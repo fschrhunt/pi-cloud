@@ -1,5 +1,5 @@
 import { createPrivateKey } from "node:crypto";
-import { issueTaskLease } from "../packages/contracts/dist/index.js";
+import { issueTaskLease } from "../contracts/dist/index.js";
 
 const [taskId, repositoryUrl, revision] = process.argv.slice(2);
 if (!taskId || !repositoryUrl || !revision) {

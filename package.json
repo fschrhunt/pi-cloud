@@ -4,7 +4,7 @@
   "private": true,
   "description": "Secure, ephemeral coding environments for Pi.",
   "workspaces": [
-    "packages/*",
+    "contracts",
     "apps/*"
   ],
   "packageManager": "npm@11.8.0",

@@ -118,8 +118,7 @@ docker compose run --rm runner
 apps/
   api/       Fastify control plane and in-memory task API
   runner/    Pi RPC runner entry point, configuration, and Docker image
-packages/
-  contracts/ Shared runner/control-plane wire contracts
+contracts/    Shared runner/control-plane wire contracts
 assets/      Project identity assets
 docs/        Architecture and operating decisions
 scripts/     Local development key and lease helpers

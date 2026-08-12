@@ -16,7 +16,11 @@ Receives one signed, time-limited task lease. It creates an isolated workspace, 
 
 ### Sandbox provider
 
-Abstracts VM/container lifecycle only. The first implementation should target local Docker for development; production should favor microVMs or a strongly isolated container runtime. The runner protocol must remain suitable for customer-hosted runners.
+Abstracts VM/container lifecycle only. The local implementation is Docker, configured with a non-root user, read-only filesystem, dropped capabilities, resource limits, and no network. This is a developer smoke-test environment—not an adequate hosted multi-tenant boundary. Production should use one disposable microVM per task; the runner protocol must remain suitable for customer-hosted runners.
+
+## Current vertical slice
+
+`POST /v1/tasks` accepts an HTTPS repository URL, immutable revision, and prompt, then creates an in-memory `queued` task. This deliberately stops before dispatch: no user authentication, durable storage, runner lease, checkout, or Pi process exists yet. The narrow contract lets us add those components in order without putting repository execution in the API process.
 
 ## Trust boundaries
 

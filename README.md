@@ -6,7 +6,7 @@ Pi Cloud gives [Pi](https://pi.dev) a safe remote workspace: connect a repositor
 
 ## Status
 
-**Pre-alpha — foundation in progress.** This repository contains the initial monorepo, a health-checked control-plane service, and a runner contract. Nothing here should be used to process production repositories or credentials yet.
+**Pre-alpha — local vertical slice in progress.** This repository contains the initial monorepo, a health-checked control-plane service, an in-memory task API, and a hardened local Docker runner baseline. Nothing here should be used to process production repositories or credentials yet.
 
 ## Product principles
 
@@ -42,9 +42,10 @@ See [docs/architecture.md](docs/architecture.md) for component responsibilities 
 
 ```text
 apps/
-  api/       Fastify control-plane API; currently exposes health metadata.
-  runner/    Pi RPC runner entry point and sandbox-facing configuration.
+  api/       Fastify control-plane API; health and in-memory task endpoints.
+  runner/    Pi RPC runner entry point, configuration validation, and Docker image.
 docs/        Architecture and operating decisions.
+compose.yaml Local runner smoke test with restrictive Docker settings.
 ```
 
 ## Prerequisites
@@ -61,6 +62,11 @@ npm install
 cp .env.example .env
 npm run dev:api
 curl http://localhost:3000/health
+
+# In a second terminal, create a task (records are intentionally in-memory for now).
+curl -X POST http://localhost:3000/v1/tasks \\
+  -H 'content-type: application/json' \\
+  -d '{"repositoryUrl":"https://github.com/pi-cloud/example","revision":"4f3c2d1","prompt":"Inspect the repository."}'
 ```
 
 Expected response:
@@ -87,6 +93,17 @@ npm test
 | TypeScript + `tsx` | Type-checking and fast local TypeScript execution. |
 
 Postgres, a durable queue, object storage, a GitHub App SDK, and a browser automation service are intentional **next** dependencies—not install-time assumptions. We should choose each after the task and runner protocol are stable.
+
+## Local runner smoke test
+
+The compose service demonstrates the minimum container restrictions: non-root execution, read-only root filesystem, dropped Linux capabilities, PID/memory/CPU limits, and no network. It validates boot configuration only; it does **not** yet clone a repository or start Pi.
+
+```bash
+PI_CLOUD_TASK_LEASE=development-only \\
+  docker compose run --rm runner
+```
+
+The real runner will receive a signed, one-task lease from the control plane. Docker is strictly a local-development provider; hosted tasks will use disposable microVMs.
 
 ## Near-term milestones
 

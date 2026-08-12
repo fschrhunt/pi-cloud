@@ -7,7 +7,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit -p tsconfig.json",
     "dev": "tsx src/runner.ts",
-    "start": "node dist/runner.js"
+    "start": "node dist/runner.js",
+    "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.1",

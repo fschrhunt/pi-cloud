@@ -20,9 +20,9 @@ Abstracts VM/container lifecycle only. The local implementation is Docker, confi
 
 ## Current vertical slice
 
-The authenticated `/v1/agents` API creates a durable conversation, initial finite run, and queued dispatch task for an exact repository revision. SQLite transactions record legal lifecycle transitions, idempotency, one active mutating run per agent, budgets, cancellation, atomic assignment, single-use lease redemption, bounded recovery, and append-only events. User/service credentials authorize public records; a separate dispatcher credential claims work. Reconnectable SSE replays events by opaque cursor across API restarts.
+The authenticated `/v1/agents` API creates a durable conversation, initial finite run, and queued dispatch task for an exact repository revision. SQLite transactions record legal lifecycle transitions, idempotency, one active mutating run per agent, budgets, cancellation, atomic assignment, single-use lease redemption, checkout provenance, bounded recovery, and append-only events. User/service credentials authorize public records; a separate dispatcher credential claims work. Reconnectable SSE replays events by opaque cursor across API restarts.
 
-This slice still stops before repository checkout or Pi process startup. The runner can redeem one assignment and publish control-plane events, but only later runner milestones may execute the repository.
+This slice now includes exact-revision checkout and durable checkout provenance, but it still stops before Pi process startup. The runner redeems one assignment, materializes the detached repository revision under hardened Git policy, and reports that evidence before later milestones invoke Pi.
 
 ## Trust boundaries
 
@@ -36,7 +36,7 @@ This slice still stops before repository checkout or Pi process startup. The run
 
 ## Task leases
 
-The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. Atomic dispatch persists the assignment and token digest; redemption verifies the signed claims and assigned runner exactly once before repository execution. Heartbeats maintain the redeemed assignment without extending the cryptographic redemption lifetime. See [task-leases.md](task-leases.md) and [control-plane-api.md](control-plane-api.md).
+The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. Atomic dispatch persists the assignment and token digest; redemption verifies the signed claims and assigned runner exactly once before repository execution. Heartbeats maintain the redeemed assignment without extending the cryptographic redemption lifetime. The runner also identifies itself explicitly so durable provenance can be tied to the redeemed assignment before checkout. See [task-leases.md](task-leases.md) and [control-plane-api.md](control-plane-api.md).
 
 ## Pi integration
 

@@ -10,9 +10,12 @@ services:
       PI_CLOUD_TASK_LEASE_PUBLIC_KEY: ${PI_CLOUD_TASK_LEASE_PUBLIC_KEY:?Set the Ed25519 lease verification key}
       PI_CLOUD_TASK_LEASE_ISSUER: ${PI_CLOUD_TASK_LEASE_ISSUER:-pi-cloud-control-plane}
       PI_CLOUD_RUNNER_AUDIENCE: ${PI_CLOUD_RUNNER_AUDIENCE:-runner-pool/local}
+      PI_CLOUD_RUNNER_ID: ${PI_CLOUD_RUNNER_ID:-runner-local-1}
+      PI_CLOUD_WORKSPACE_ROOT: /workspace
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
+      - /workspace:rw,noexec,nosuid,size=256m
     cap_drop:
       - ALL
     security_opt:

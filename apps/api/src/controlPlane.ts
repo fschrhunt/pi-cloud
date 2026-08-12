@@ -6,6 +6,7 @@ import type { ApiConfig } from "./config.js";
 import {
   createAgentSchema,
   createFollowUpSchema,
+  checkoutProvenanceSchema,
   heartbeatSchema,
   ingestRunEventSchema,
   terminalRunStatuses,
@@ -152,6 +153,15 @@ export class ControlPlane {
 
   ingestEvent(token: string, runId: string, input: unknown) {
     return this.store.ingestEvent(tokenDigest(token), runId, ingestRunEventSchema.parse(input), this.clock());
+  }
+
+  reportCheckoutProvenance(token: string, runId: string, input: unknown) {
+    return this.store.recordCheckoutProvenance(
+      tokenDigest(token),
+      runId,
+      checkoutProvenanceSchema.parse(input),
+      this.clock(),
+    );
   }
 
   listEvents(principal: Principal, runId: string, cursor?: string) {

@@ -9,7 +9,7 @@ const leaseInput = {
   privateKey,
   taskId: "a0d701e3-bae6-427a-bc22-35d885915da3",
   repositoryUrl: "https://github.com/pi-cloud/example",
-  revision: "4f3c2d1",
+  revision: "0123456789abcdef0123456789abcdef01234567",
   issuer: "pi-cloud-control-plane",
   audience: "runner-pool/local",
   ttlSeconds: 60,

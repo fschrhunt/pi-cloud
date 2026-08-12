@@ -4,4 +4,7 @@ dist/
 .env.*
 !.env.example
 coverage/
+data/
+*.sqlite-shm
+*.sqlite-wal
 .DS_Store

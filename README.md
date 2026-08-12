@@ -47,20 +47,22 @@ Read [`docs/architecture.md`](docs/architecture.md) for component responsibiliti
 
 ## What works today
 
-- Fastify control-plane service with a health endpoint
-- Validated, in-memory task creation and lookup API
-- Signed, short-lived, task-bound Ed25519 runner leases
+- Authenticated, SQLite-backed durable agents, finite runs, tasks, and lifecycle history
+- Cursor-paginated lifecycle API with idempotent create, follow-up, cancellation, archive, and delete contracts
+- Atomic runner dispatch and single-use, task-bound Ed25519 lease redemption
+- Persisted run budgets, heartbeats, bounded retry/recovery, and terminal reasons
+- Append-only allowlisted events with opaque-cursor SSE reconnect
 - Runner boot configuration and lease verification
 - Restrictive local Docker runner baseline
-- TypeScript workspace checks, builds, and focused tests
+- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect tests
 
-The current slice deliberately stops before user authentication, durable storage, task dispatch, repository checkout, and Pi process startup. Lease consumption is not replay-safe until dispatch state is durable; see [`docs/task-leases.md`](docs/task-leases.md).
+The current slice deliberately stops before repository checkout and Pi process startup. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
 
 ## Quick start
 
 ### Requirements
 
-- Node.js 22+
+- Node.js 22.5+ (`node:sqlite`)
 - npm 11+
 - Docker for the local runner smoke test
 - A Pi-supported model credential once RPC execution is connected
@@ -71,6 +73,8 @@ The current slice deliberately stops before user authentication, durable storage
 npm install
 eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
 export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
+export PI_CLOUD_USER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
+export PI_CLOUD_API_CREDENTIALS="[{\"token\":\"$PI_CLOUD_USER_TOKEN\",\"subjectId\":\"local-user\",\"type\":\"user\",\"displayName\":\"Local User\"}]"
 npm run dev:api
 ```
 
@@ -84,10 +88,12 @@ curl http://localhost:3000/health
 {"status":"ok","service":"pi-cloud-api"}
 ```
 
-Create an in-memory task:
+Create a durable agent and initial run:
 
 ```bash
-curl -X POST http://localhost:3000/v1/tasks \
+curl -X POST http://localhost:3000/v1/agents \
+  -H "authorization: Bearer $PI_CLOUD_USER_TOKEN" \
+  -H 'idempotency-key: local-agent-0001' \
   -H 'content-type: application/json' \
   -d '{
     "repositoryUrl": "https://github.com/pi-cloud/example",
@@ -95,6 +101,8 @@ curl -X POST http://localhost:3000/v1/tasks \
     "prompt": "Inspect the repository."
   }'
 ```
+
+The default database is `./data/pi-cloud.sqlite`. See the [durable control-plane API](docs/control-plane-api.md) for lifecycle, dispatch, event, and recovery endpoints.
 
 ### Smoke-test the runner
 
@@ -116,7 +124,7 @@ docker compose run --rm runner
 
 ```text
 apps/
-  api/       Fastify control plane and in-memory task API
+  api/       Fastify control plane, durable lifecycle API, dispatch, and events
   runner/    Pi RPC runner entry point, configuration, and Docker image
 packages/
   contracts/ Shared runner/control-plane wire contracts
@@ -139,17 +147,18 @@ npm test
 | Dependency | Role |
 | --- | --- |
 | [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) | Pi CLI and RPC mode, executed inside a runner |
+| Node `node:sqlite` | Transactional pre-alpha control-plane metadata and migrations |
 | [Fastify](https://fastify.dev/) + `@fastify/cors` | Typed control-plane HTTP API |
 | [Zod](https://zod.dev/) | Validation for untrusted API, lease, and runner inputs |
 | TypeScript + `tsx` | Type checking and local TypeScript execution |
 
-Postgres, a durable queue, object storage, a GitHub App SDK, and browser automation are intentional next dependencies—not install-time assumptions. Each should follow a concrete requirement in the task and runner protocol.
+Postgres/multi-node dispatch, object storage, a GitHub App SDK, and browser automation are intentional later dependencies—not install-time assumptions. Each should follow a concrete requirement in the task and runner protocol.
 
 ## Roadmap
 
-1. Add durable single-use lease dispatch and a runner-to-control-plane event protocol.
-2. Provision a disposable local runner with non-root execution, limits, and cleanup.
-3. Start Pi with `--mode rpc`, persist event streams, and support reconnecting to a task.
+1. **Complete:** durable agents/runs/tasks, single-use lease dispatch, bounded events, authentication, budgets, and recovery.
+2. Provision a disposable local runner with exact-revision checkout, policy enforcement, and cleanup.
+3. Start Pi with `--mode rpc`, sanitize its event stream, and retain patches/artifacts.
 4. Add GitHub App installation, scoped tokens, patch review, and pull-request creation.
 5. Move execution behind a self-hostable runner protocol before adding enterprise features.
 

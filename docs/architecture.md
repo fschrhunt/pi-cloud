@@ -8,7 +8,7 @@ Pi Cloud separates **orchestration** from **code execution**. The control plane 
 
 ### Control plane (`apps/api`)
 
-Owns users, repository connections, task metadata, approvals, task leases, audit records, and the public event API. It must not mount a task workspace, run shell commands supplied by a repository, or receive long-lived model credentials from a runner.
+Owns authenticated agents, finite runs, dispatch tasks, lifecycle history, budgets, task leases, and the public event API. Metadata is durably stored in a transactional SQLite database for the single-process pre-alpha control plane. It must not mount a task workspace, run shell commands supplied by a repository, or receive long-lived model credentials from a runner.
 
 ### Runner (`apps/runner`)
 
@@ -20,7 +20,9 @@ Abstracts VM/container lifecycle only. The local implementation is Docker, confi
 
 ## Current vertical slice
 
-`POST /v1/tasks` accepts an HTTPS repository URL, immutable revision, and prompt, then creates an in-memory `queued` task. An authenticated internal dispatcher can issue a signed five-minute lease for an existing queued task, and the runner verifies that authority at boot. This deliberately stops before user authentication, durable storage, replay-safe dispatch, checkout, or Pi process startup. The narrow contract lets us add those components in order without putting repository execution in the API process.
+The authenticated `/v1/agents` API creates a durable conversation, initial finite run, and queued dispatch task for an exact repository revision. SQLite transactions record legal lifecycle transitions, idempotency, one active mutating run per agent, budgets, cancellation, atomic assignment, single-use lease redemption, bounded recovery, and append-only events. User/service credentials authorize public records; a separate dispatcher credential claims work. Reconnectable SSE replays events by opaque cursor across API restarts.
+
+This slice still stops before repository checkout or Pi process startup. The runner can redeem one assignment and publish control-plane events, but only later runner milestones may execute the repository.
 
 ## Trust boundaries
 
@@ -34,7 +36,7 @@ Abstracts VM/container lifecycle only. The local implementation is Docker, confi
 
 ## Task leases
 
-The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. The runner holds only the public key and verifies the lease before repository execution. See [task-leases.md](task-leases.md) for the wire contract and current replay boundary.
+The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. Atomic dispatch persists the assignment and token digest; redemption verifies the signed claims and assigned runner exactly once before repository execution. Heartbeats maintain the redeemed assignment without extending the cryptographic redemption lifetime. See [task-leases.md](task-leases.md) and [control-plane-api.md](control-plane-api.md).
 
 ## Pi integration
 

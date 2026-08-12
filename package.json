@@ -9,7 +9,7 @@
   ],
   "packageManager": "npm@11.8.0",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",

@@ -49,11 +49,12 @@ Read [`docs/architecture.md`](docs/architecture.md) for component responsibiliti
 
 - Fastify control-plane service with a health endpoint
 - Validated, in-memory task creation and lookup API
-- Runner boot configuration validation
+- Signed, short-lived, task-bound Ed25519 runner leases
+- Runner boot configuration and lease verification
 - Restrictive local Docker runner baseline
 - TypeScript workspace checks, builds, and focused tests
 
-The current slice deliberately stops before authentication, durable storage, task dispatch, repository checkout, and Pi process startup.
+The current slice deliberately stops before user authentication, durable storage, task dispatch, repository checkout, and Pi process startup. Lease consumption is not replay-safe until dispatch state is durable; see [`docs/task-leases.md`](docs/task-leases.md).
 
 ## Quick start
 
@@ -68,7 +69,8 @@ The current slice deliberately stops before authentication, durable storage, tas
 
 ```bash
 npm install
-cp .env.example .env
+eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
+export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 npm run dev:api
 ```
 
@@ -96,13 +98,19 @@ curl -X POST http://localhost:3000/v1/tasks \
 
 ### Smoke-test the runner
 
-The Compose service boots as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and no network:
+The Compose service boots as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and no network. Generate a development key pair, then mint a five-minute lease for a task UUID and exact revision:
 
 ```bash
-PI_CLOUD_TASK_LEASE=development-only docker compose run --rm runner
+eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
+npm run build --workspace=@pi-cloud/contracts
+export PI_CLOUD_TASK_LEASE="$(node scripts/create-development-lease.mjs \
+  a0d701e3-bae6-427a-bc22-35d885915da3 \
+  https://github.com/pi-cloud/example \
+  4f3c2d1)"
+docker compose run --rm runner
 ```
 
-This validates boot configuration only. Docker is a local-development provider—not an adequate hosted multi-tenant boundary.
+`PI_CLOUD_TASK_LEASE_PRIVATE_KEY` and `PI_CLOUD_TASK_LEASE_PUBLIC_KEY` must contain the generated pair. This validates boot configuration only. Docker is a local-development provider—not an adequate hosted multi-tenant boundary.
 
 ## Repository map
 
@@ -110,8 +118,11 @@ This validates boot configuration only. Docker is a local-development provider�
 apps/
   api/       Fastify control plane and in-memory task API
   runner/    Pi RPC runner entry point, configuration, and Docker image
+packages/
+  contracts/ Shared runner/control-plane wire contracts
 assets/      Project identity assets
 docs/        Architecture and operating decisions
+scripts/     Local development key and lease helpers
 compose.yaml Local runner smoke test
 ```
 
@@ -136,7 +147,7 @@ Postgres, a durable queue, object storage, a GitHub App SDK, and browser automat
 
 ## Roadmap
 
-1. Define authenticated task leases and a runner-to-control-plane event protocol.
+1. Add durable single-use lease dispatch and a runner-to-control-plane event protocol.
 2. Provision a disposable local runner with non-root execution, limits, and cleanup.
 3. Start Pi with `--mode rpc`, persist event streams, and support reconnecting to a task.
 4. Add GitHub App installation, scoped tokens, patch review, and pull-request creation.

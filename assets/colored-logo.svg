@@ -1,0 +1,52 @@
+<svg width="601" height="361" viewBox="0 0 601 361" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Color-block logo</title>
+  <defs>
+    <!-- Each block uses the reference image's light upper face and darker lower face. -->
+    <linearGradient id="blue" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0.55" stop-color="#546E88"/>
+      <stop offset="0.55" stop-color="#425B77"/>
+      <stop offset="1" stop-color="#425B77"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0.55" stop-color="#A3513D"/>
+      <stop offset="0.55" stop-color="#903D29"/>
+      <stop offset="1" stop-color="#903D29"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0.55" stop-color="#E2964F"/>
+      <stop offset="0.55" stop-color="#D2833A"/>
+      <stop offset="1" stop-color="#D2833A"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0.55" stop-color="#AAAB78"/>
+      <stop offset="0.55" stop-color="#999A66"/>
+      <stop offset="1" stop-color="#999A66"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Blue upper section -->
+  <g fill="url(#blue)" stroke="#29435D" stroke-opacity="0.58" stroke-width="5">
+    <rect x="120.174" y="0" width="120.174" height="120.174"/>
+    <rect x="240.348" y="0" width="120.174" height="120.174"/>
+    <rect x="240.348" y="120.174" width="120.174" height="120.174"/>
+  </g>
+
+  <!-- Red left section -->
+  <g fill="url(#red)" stroke="#783622" stroke-opacity="0.58" stroke-width="5">
+    <rect x="0" y="120.174" width="120.174" height="120.174"/>
+    <rect x="120.174" y="120.174" width="120.174" height="120.174"/>
+  </g>
+
+  <!-- Orange lower section -->
+  <g fill="url(#orange)" stroke="#AD6A28" stroke-opacity="0.58" stroke-width="5">
+    <rect x="120.174" y="240.348" width="120.174" height="120.174"/>
+    <rect x="240.348" y="240.348" width="120.174" height="120.174"/>
+  </g>
+
+  <!-- Green right section -->
+  <g fill="url(#green)" stroke="#73764D" stroke-opacity="0.58" stroke-width="5">
+    <rect x="360.522" y="120.174" width="120.174" height="120.174"/>
+    <rect x="360.522" y="240.348" width="120.174" height="120.174"/>
+    <rect x="480.696" y="240.348" width="120.174" height="120.174"/>
+  </g>
+</svg>

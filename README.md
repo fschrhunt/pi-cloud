@@ -2,8 +2,7 @@
   <img src="./assets/logo.svg" width="220" alt="Pi Cloud logo">
 </p>
 
-> [!NOTE]
-> **Secure, ephemeral coding environments for Pi.**
+> Secure, ephemeral coding environments for Pi.
 
 # Pi Cloud
 

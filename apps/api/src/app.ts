@@ -170,6 +170,10 @@ async function* eventStream(
       cursor = event.cursor;
       yield formatSse(event);
     }
+    if (events.length === ControlPlane.eventBatchSize) {
+      events = controlPlane.listEvents(principal, runId, cursor);
+      continue;
+    }
     if (!follow || controlPlane.isRunTerminal(principal, runId)) return;
     await delay(15_000);
     if (disconnected()) return;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -276,6 +276,40 @@ test("runner events are bounded, ordered, idempotent, and reconnect through opaq
   await app.close();
 });
 
+test("SSE replay drains more than one bounded database batch", async () => {
+  const app = await buildApp(config());
+  const created = await createAgent(app, "batched-events-0001");
+  const runId = created.json().run.id;
+  const lease = (await claim(app)).json().lease;
+  await redeem(app, lease);
+
+  for (let runnerSequence = 1; runnerSequence <= 101; runnerSequence += 1) {
+    const response = await app.inject({
+      method: "POST",
+      url: `/internal/v1/runs/${runId}/events`,
+      headers: { authorization: `Bearer ${lease}` },
+      payload: {
+        runnerEventId: randomUUID(),
+        runnerSequence,
+        kind: "run.progress",
+        payload: { message: `Progress ${runnerSequence}.` },
+      },
+    });
+    assert.equal(response.statusCode, 201);
+  }
+
+  const replay = await app.inject({
+    method: "GET",
+    url: `/v1/runs/${runId}/events?follow=false`,
+    headers: authorization,
+  });
+  assert.equal(replay.statusCode, 200);
+  assert.equal(replay.body.match(/event: run\.progress/g)?.length, 101);
+  assert.match(replay.body, /Progress 101\./);
+
+  await app.close();
+});
+
 test("heartbeats expose cancellation and enforce monotonic run budgets", async () => {
   const app = await buildApp(config());
   const created = await createAgent(app, "budget-agent-0001", {
@@ -337,6 +371,18 @@ test("recovery requeues a lost runner with backoff and resolves cancellation rac
   const firstLease = (await claim(app)).json().lease;
   const firstClaims = verifyTaskLease(firstLease, { publicKey, issuer: "pi-cloud-test", audience: "runner-pool/local", now });
   await redeem(app, firstLease);
+  const firstAttemptEvent = await app.inject({
+    method: "POST",
+    url: `/internal/v1/runs/${runId}/events`,
+    headers: { authorization: `Bearer ${firstLease}` },
+    payload: {
+      runnerEventId: "01ba80cf-7229-4474-ac9f-5cd3ba14d3b1",
+      runnerSequence: 1,
+      kind: "run.progress",
+      payload: { message: "First attempt." },
+    },
+  });
+  assert.equal(firstAttemptEvent.statusCode, 201);
 
   now = new Date(now.getTime() + 16_000);
   const recovered = await app.inject({
@@ -356,6 +402,32 @@ test("recovery requeues a lost runner with backoff and resolves cancellation rac
   now = new Date(now.getTime() + 5_000);
   const secondLease = (await claim(app, "runner-2")).json().lease;
   await redeem(app, secondLease, "runner-2");
+  const reusedEventId = await app.inject({
+    method: "POST",
+    url: `/internal/v1/runs/${runId}/events`,
+    headers: { authorization: `Bearer ${secondLease}` },
+    payload: {
+      runnerEventId: "01ba80cf-7229-4474-ac9f-5cd3ba14d3b1",
+      runnerSequence: 1,
+      kind: "run.progress",
+      payload: { message: "Conflicting replacement event." },
+    },
+  });
+  assert.equal(reusedEventId.statusCode, 409);
+  assert.equal(reusedEventId.json().code, "event_id_conflict");
+  const replacementEvent = await app.inject({
+    method: "POST",
+    url: `/internal/v1/runs/${runId}/events`,
+    headers: { authorization: `Bearer ${secondLease}` },
+    payload: {
+      runnerEventId: "1ba8ac44-db44-4fc4-a7cc-5245795dd8e9",
+      runnerSequence: 1,
+      kind: "run.progress",
+      payload: { message: "Replacement attempt." },
+    },
+  });
+  assert.equal(replacementEvent.statusCode, 201);
+  assert.equal(replacementEvent.json().sequence, 2);
   const canceled = await app.inject({ method: "POST", url: `/v1/runs/${runId}/cancel`, headers: authorization });
   now = new Date(now.getTime() + 16_000);
   await app.inject({
@@ -368,6 +440,37 @@ test("recovery requeues a lost runner with backoff and resolves cancellation rac
   assert.equal(terminal.json().status, "canceled");
   assert.equal(terminal.json().retryCount, 1);
   assert.equal(terminal.json().terminalReason, "user_canceled");
+
+  await app.close();
+});
+
+test("wall-time accounting starts when a runner redeems its lease", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const app = await buildApp(config(), () => now);
+  const created = await createAgent(app, "wall-time-agent-0001", {
+    wallTimeSeconds: 30,
+    idleTimeSeconds: 15,
+    cpuSeconds: 100,
+    memoryMb: 128,
+    artifactBytes: 100,
+    eventCount: 10,
+    eventBytes: 1024,
+    maxRetries: 1,
+  });
+  const runId = created.json().run.id;
+  await claim(app);
+
+  now = new Date(now.getTime() + 31_000);
+  const recovered = await app.inject({
+    method: "POST",
+    url: "/internal/v1/recovery",
+    headers: { authorization: `Bearer ${dispatcherToken}` },
+  });
+  const run = await app.inject({ method: "GET", url: `/v1/runs/${runId}`, headers: authorization });
+
+  assert.deepEqual(recovered.json(), { requeued: 0, failed: 0, canceled: 0 });
+  assert.equal(run.json().status, "assigned");
+  assert.equal(run.json().startedAt, null);
 
   await app.close();
 });

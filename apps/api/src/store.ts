@@ -94,6 +94,7 @@ const migrations = [
   CREATE TABLE run_events (
     cursor TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL REFERENCES leases(lease_id) ON DELETE CASCADE,
     sequence INTEGER NOT NULL,
     runner_event_id TEXT NOT NULL,
     runner_sequence INTEGER NOT NULL,
@@ -103,7 +104,7 @@ const migrations = [
     byte_size INTEGER NOT NULL,
     UNIQUE(run_id, sequence),
     UNIQUE(run_id, runner_event_id),
-    UNIQUE(run_id, runner_sequence)
+    UNIQUE(lease_id, runner_sequence)
   ) STRICT;
 
   CREATE TABLE idempotency_keys (
@@ -546,21 +547,28 @@ export class ControlPlaneStore {
       const payloadJson = JSON.stringify(event.payload);
       const duplicate = this.database
         .prepare(
-          `SELECT run_events.* FROM run_events
-           JOIN leases ON leases.run_id = run_events.run_id
-           WHERE run_events.run_id = ? AND run_events.runner_event_id = ? AND leases.token_digest = ?
-             AND (leases.revoked_at IS NULL OR run_events.kind = 'run.result')`,
+          `SELECT run_events.*, leases.token_digest AS lease_token_digest, leases.revoked_at AS lease_revoked_at
+           FROM run_events JOIN leases ON leases.lease_id = run_events.lease_id
+           WHERE run_events.run_id = ? AND run_events.runner_event_id = ?`,
         )
-        .get(runId, event.runnerEventId, tokenDigest) as EventRow | undefined;
+        .get(runId, event.runnerEventId) as DuplicateEventRow | undefined;
       if (duplicate) {
         if (
-          duplicate.runner_sequence !== event.runnerSequence ||
-          duplicate.kind !== event.kind ||
-          duplicate.payload_json !== payloadJson
+          duplicate.lease_token_digest === tokenDigest &&
+          (duplicate.lease_revoked_at === null || duplicate.kind === "run.result")
         ) {
-          throw conflict("event_id_conflict", "Runner event ID was reused with different content");
+          if (
+            duplicate.runner_sequence !== event.runnerSequence ||
+            duplicate.kind !== event.kind ||
+            duplicate.payload_json !== payloadJson
+          ) {
+            throw conflict("event_id_conflict", "Runner event ID was reused with different content");
+          }
+          return mapEvent(duplicate);
         }
-        return mapEvent(duplicate);
+
+        this.requireRedeemedLeaseForRun(tokenDigest, runId);
+        throw conflict("event_id_conflict", "Runner event ID was already used by another assignment");
       }
 
       const lease = this.requireRedeemedLeaseForRun(tokenDigest, runId);
@@ -571,8 +579,12 @@ export class ControlPlaneStore {
       if (byteSize > run.budgets.eventPayloadBytes) throw conflict("event_too_large", "Event payload exceeds the per-event budget");
 
       const tail = this.database
-        .prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence, COALESCE(MAX(runner_sequence), 0) AS runner_sequence FROM run_events WHERE run_id = ?")
-        .get(runId) as { sequence: number; runner_sequence: number };
+        .prepare(
+          `SELECT COALESCE(MAX(sequence), 0) AS sequence,
+                  COALESCE((SELECT MAX(runner_sequence) FROM run_events WHERE lease_id = ?), 0) AS runner_sequence
+           FROM run_events WHERE run_id = ?`,
+        )
+        .get(lease.lease_id, runId) as { sequence: number; runner_sequence: number };
       if (event.runnerSequence !== tail.runner_sequence + 1) {
         throw conflict("event_out_of_order", "Runner event sequence is not contiguous");
       }
@@ -587,10 +599,21 @@ export class ControlPlaneStore {
       this.database
         .prepare(
           `INSERT INTO run_events
-           (cursor, run_id, sequence, runner_event_id, runner_sequence, timestamp, kind, payload_json, byte_size)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (cursor, run_id, lease_id, sequence, runner_event_id, runner_sequence, timestamp, kind, payload_json, byte_size)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(cursor, runId, tail.sequence + 1, event.runnerEventId, event.runnerSequence, timestamp, event.kind, payloadJson, byteSize);
+        .run(
+          cursor,
+          runId,
+          lease.lease_id,
+          tail.sequence + 1,
+          event.runnerEventId,
+          event.runnerSequence,
+          timestamp,
+          event.kind,
+          payloadJson,
+          byteSize,
+        );
       const nextConsumed = {
         ...run.consumed,
         eventCount: run.consumed.eventCount + 1,
@@ -633,7 +656,7 @@ export class ControlPlaneStore {
     });
   }
 
-  listEvents(ownerId: string, runId: string, afterCursor?: string): RunEvent[] {
+  listEvents(ownerId: string, runId: string, limit: number, afterCursor?: string): RunEvent[] {
     this.requireRun(ownerId, runId);
     let afterSequence = 0;
     if (afterCursor) {
@@ -645,8 +668,8 @@ export class ControlPlaneStore {
       afterSequence = cursor.sequence;
     }
     const rows = this.database
-      .prepare("SELECT * FROM run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC")
-      .all(runId, afterSequence) as unknown as EventRow[];
+      .prepare("SELECT * FROM run_events WHERE run_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT ?")
+      .all(runId, afterSequence, limit) as unknown as EventRow[];
     return rows.map(mapEvent);
   }
 
@@ -672,7 +695,8 @@ export class ControlPlaneStore {
         const assignedExpired = run.status === "assigned" && row.expires_at !== null && row.expires_at <= timestamp;
         const heartbeatAt = row.effective_heartbeat ? new Date(row.effective_heartbeat).getTime() : new Date(run.createdAt).getTime();
         const runnerLost = run.status !== "assigned" && now.getTime() - heartbeatAt > budgets.idleTimeSeconds * 1_000;
-        const wallExceeded = now.getTime() - new Date(run.startedAt ?? run.createdAt).getTime() > budgets.wallTimeSeconds * 1_000;
+        const wallExceeded =
+          run.startedAt !== null && now.getTime() - new Date(run.startedAt).getTime() > budgets.wallTimeSeconds * 1_000;
         if (!assignedExpired && !runnerLost && !wallExceeded) continue;
 
         this.revokeRunLease(run.id, timestamp);
@@ -841,6 +865,11 @@ export class ControlPlaneStore {
   }
 }
 
+type DuplicateEventRow = EventRow & {
+  lease_token_digest: string;
+  lease_revoked_at: string | null;
+};
+
 type EventRow = {
   cursor: string;
   run_id: string;
@@ -931,7 +960,7 @@ function exceededBudget(run: Run, consumed: Run["consumed"], now: Date): string 
   if (budgets.providerUsage !== undefined && (consumed.providerUsage ?? 0) > budgets.providerUsage) {
     return "budget_exceeded:provider_usage";
   }
-  if (now.getTime() - new Date(run.startedAt ?? run.createdAt).getTime() > budgets.wallTimeSeconds * 1_000) {
+  if (run.startedAt !== null && now.getTime() - new Date(run.startedAt).getTime() > budgets.wallTimeSeconds * 1_000) {
     return "budget_exceeded:wall_time";
   }
   return undefined;

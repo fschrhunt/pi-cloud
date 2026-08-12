@@ -23,6 +23,7 @@ const listQuerySchema = z.object({
 
 /** Coordinates authenticated lifecycle, dispatch, events, and recovery over durable metadata. */
 export class ControlPlane {
+  static readonly eventBatchSize = 100;
   readonly store: ControlPlaneStore;
   private readonly privateKey;
   private readonly publicKey;
@@ -154,7 +155,7 @@ export class ControlPlane {
   }
 
   listEvents(principal: Principal, runId: string, cursor?: string) {
-    return this.store.listEvents(principal.id, runId, cursor);
+    return this.store.listEvents(principal.id, runId, ControlPlane.eventBatchSize, cursor);
   }
 
   recover() {

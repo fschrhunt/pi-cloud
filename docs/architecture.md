@@ -20,17 +20,21 @@ Abstracts VM/container lifecycle only. The local implementation is Docker, confi
 
 ## Current vertical slice
 
-`POST /v1/tasks` accepts an HTTPS repository URL, immutable revision, and prompt, then creates an in-memory `queued` task. This deliberately stops before dispatch: no user authentication, durable storage, runner lease, checkout, or Pi process exists yet. The narrow contract lets us add those components in order without putting repository execution in the API process.
+`POST /v1/tasks` accepts an HTTPS repository URL, immutable revision, and prompt, then creates an in-memory `queued` task. An authenticated internal dispatcher can issue a signed five-minute lease for an existing queued task, and the runner verifies that authority at boot. This deliberately stops before user authentication, durable storage, replay-safe dispatch, checkout, or Pi process startup. The narrow contract lets us add those components in order without putting repository execution in the API process.
 
 ## Trust boundaries
 
 | Boundary | Rule |
 | --- | --- |
 | Browser → control plane | Authenticate every request; authorize by repository installation and task membership. |
-| Control plane → runner | Use signed, single-task leases with expiry, audience, and replay protection. |
+| Control plane → runner | Use signed, single-task leases with expiry and audience. Add durable single-use consumption before repository execution. |
 | Runner → repository | Treat checkout hooks, dependencies, and project-local Pi extensions as untrusted code. |
 | Runner → external network | Deny by default; allow only required Git, package, model, and task endpoints. |
 | Runner → control plane | Redact configured secrets; accept an allowlisted event schema and bounded artifact sizes. |
+
+## Task leases
+
+The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. The runner holds only the public key and verifies the lease before repository execution. See [task-leases.md](task-leases.md) for the wire contract and current replay boundary.
 
 ## Pi integration
 

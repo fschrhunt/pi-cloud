@@ -6,7 +6,10 @@ services:
       dockerfile: apps/runner/Dockerfile
     environment:
       PI_CLOUD_CONTROL_PLANE_URL: ${PI_CLOUD_CONTROL_PLANE_URL:-https://control-plane.invalid}
-      PI_CLOUD_TASK_LEASE: ${PI_CLOUD_TASK_LEASE:?Set a short-lived development lease before running}
+      PI_CLOUD_TASK_LEASE: ${PI_CLOUD_TASK_LEASE:?Set a signed short-lived development lease before running}
+      PI_CLOUD_TASK_LEASE_PUBLIC_KEY: ${PI_CLOUD_TASK_LEASE_PUBLIC_KEY:?Set the Ed25519 lease verification key}
+      PI_CLOUD_TASK_LEASE_ISSUER: ${PI_CLOUD_TASK_LEASE_ISSUER:-pi-cloud-control-plane}
+      PI_CLOUD_RUNNER_AUDIENCE: ${PI_CLOUD_RUNNER_AUDIENCE:-runner-pool/local}
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m

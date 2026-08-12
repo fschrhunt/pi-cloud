@@ -1,9 +1,10 @@
-import { readRunnerConfig } from "./config.js";
+import { readRunnerConfig, readTaskLease } from "./config.js";
 
-/** Validates runner boot configuration; Pi RPC startup is the next vertical slice. */
+/** Verifies single-task authority before the runner can begin repository execution. */
 function main() {
   const config = readRunnerConfig(process.env);
-  console.log(`Runner lease accepted for ${new URL(config.controlPlaneUrl).origin}`);
+  const lease = readTaskLease(config);
+  console.log(`Runner accepted task ${lease.taskId} from ${new URL(config.controlPlaneUrl).origin}`);
 }
 
 try {

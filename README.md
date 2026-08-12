@@ -1,81 +1,127 @@
+<img src="./assets/logo.svg" width="220" alt="Pi Cloud logo">
+
+**Secure, ephemeral coding environments for Pi.**
+
 # Pi Cloud
 
-> **Secure, ephemeral coding environments for Pi.**
+Connect a repository, launch an isolated runner, steer Pi in real time, and turn the resulting patch into a pull request.
 
-Pi Cloud gives [Pi](https://pi.dev) a safe remote workspace: connect a repository, launch an isolated runner, steer the agent in real time, and turn the resulting patch into a pull request. It is deliberately **not** a browser clone of Pi or an IDE. Pi remains the agent; Pi Cloud provides the control plane, sandbox, and delivery workflow around it.
+<p>
+  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-f97316">
+  <img alt="Node.js 22 or newer" src="https://img.shields.io/badge/node-%E2%89%A522-339933?logo=nodedotjs&logoColor=white">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-18181b">
+</p>
 
-## Status
+> [!WARNING]
+> Pi Cloud is **pre-alpha**. The repository contains a local vertical slice, not a production-ready sandbox. Do not use it to process untrusted repositories or real credentials yet.
 
-**Pre-alpha — local vertical slice in progress.** This repository contains the initial monorepo, a health-checked control-plane service, an in-memory task API, and a hardened local Docker runner baseline. Nothing here should be used to process production repositories or credentials yet.
+Pi Cloud is not a browser clone of [Pi](https://pi.dev), and it is not an IDE. **Pi remains the agent.** Pi Cloud provides the control plane, isolation boundary, live event transport, and delivery workflow around it.
 
-## Product principles
+## Why Pi Cloud
 
-- **Pi-native, not Pi-shaped.** Run the existing Pi CLI in RPC mode rather than reimplementing its session or tool model.
-- **Ephemeral by default.** One repository task gets one isolated workspace with a bounded lifetime.
-- **Human steering, not black-box automation.** Stream agent events, show diffs and logs, and require explicit approval for consequential actions.
-- **Provider freedom.** Start with bring-your-own provider credentials; do not make a proprietary model gateway the product.
-- **Portable trust boundary.** A managed control plane should be able to dispatch jobs to runners in a customer VPC.
+| Principle | What it means |
+| --- | --- |
+| **Pi-native** | Run the existing Pi CLI in RPC mode instead of recreating its session or tool model. |
+| **Ephemeral by default** | Give each repository task one isolated workspace with a bounded lifetime. |
+| **Human-steered** | Stream agent events, expose diffs and logs, and require approval for consequential actions. |
+| **Provider-independent** | Start with bring-your-own provider credentials rather than a proprietary model gateway. |
+| **Portable isolation** | Keep the runner protocol suitable for managed infrastructure and customer VPCs. |
 
-## Initial architecture
+## Architecture
 
 ```text
 GitHub App / web client
           │
           ▼
-  Control plane (apps/api) ─── Postgres: tasks, users, audit records
+  Control plane (apps/api) ─── tasks, users, audit records
           │
           │ signed, short-lived task lease
           ▼
-  Runner (apps/runner) ─── isolated VM or container
+  Runner (apps/runner) ─── disposable VM or container
           │                    ├── cloned repository
           │                    ├── scoped secrets
-          │                    └── `pi --mode rpc`
+          │                    └── pi --mode rpc
           ▼
  event stream, patch, artifacts ─── control plane ─── client / GitHub PR
 ```
 
-The control plane never executes repository code. Runners do, inside a sandbox with an explicit network policy, CPU/memory/time quotas, and cleanup after every task.
+The **control plane never executes repository code**. Disposable runners do, with an explicit network policy, CPU/memory/time budgets, scoped credentials, and cleanup after every task.
 
-See [docs/architecture.md](docs/architecture.md) for component responsibilities and security boundaries.
+Read [`docs/architecture.md`](docs/architecture.md) for component responsibilities, trust boundaries, and deliberate non-goals.
 
-## Repository layout
+## What works today
 
-```text
-apps/
-  api/       Fastify control-plane API; health and in-memory task endpoints.
-  runner/    Pi RPC runner entry point, configuration validation, and Docker image.
-docs/        Architecture and operating decisions.
-compose.yaml Local runner smoke test with restrictive Docker settings.
-```
+- Fastify control-plane service with a health endpoint
+- Validated, in-memory task creation and lookup API
+- Runner boot configuration validation
+- Restrictive local Docker runner baseline
+- TypeScript workspace checks, builds, and focused tests
 
-## Prerequisites
+The current slice deliberately stops before authentication, durable storage, task dispatch, repository checkout, and Pi process startup.
+
+## Quick start
+
+### Requirements
 
 - Node.js 22+
 - npm 11+
-- Docker or a VM-provider account will be required once sandbox provisioning lands
-- A Pi-supported model credential for local runner development
+- Docker for the local runner smoke test
+- A Pi-supported model credential once RPC execution is connected
 
-## Quick start
+### Run the control plane
 
 ```bash
 npm install
 cp .env.example .env
 npm run dev:api
-curl http://localhost:3000/health
-
-# In a second terminal, create a task (records are intentionally in-memory for now).
-curl -X POST http://localhost:3000/v1/tasks \\
-  -H 'content-type: application/json' \\
-  -d '{"repositoryUrl":"https://github.com/pi-cloud/example","revision":"4f3c2d1","prompt":"Inspect the repository."}'
 ```
 
-Expected response:
+In another terminal, check the service:
+
+```bash
+curl http://localhost:3000/health
+```
 
 ```json
 {"status":"ok","service":"pi-cloud-api"}
 ```
 
-To validate the workspace:
+Create an in-memory task:
+
+```bash
+curl -X POST http://localhost:3000/v1/tasks \
+  -H 'content-type: application/json' \
+  -d '{
+    "repositoryUrl": "https://github.com/pi-cloud/example",
+    "revision": "4f3c2d1",
+    "prompt": "Inspect the repository."
+  }'
+```
+
+### Smoke-test the runner
+
+The Compose service boots as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and no network:
+
+```bash
+PI_CLOUD_TASK_LEASE=development-only docker compose run --rm runner
+```
+
+This validates boot configuration only. Docker is a local-development provider—not an adequate hosted multi-tenant boundary.
+
+## Repository map
+
+```text
+apps/
+  api/       Fastify control plane and in-memory task API
+  runner/    Pi RPC runner entry point, configuration, and Docker image
+assets/      Project identity assets
+docs/        Architecture and operating decisions
+compose.yaml Local runner smoke test
+```
+
+## Development
+
+Run the complete validation suite before handing off a change:
 
 ```bash
 npm run check
@@ -83,44 +129,33 @@ npm run build
 npm test
 ```
 
-## Dependencies
-
 | Dependency | Role |
 | --- | --- |
-| [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) | Pi CLI and its RPC mode, executed inside a runner. |
-| [Fastify](https://fastify.dev/) + `@fastify/cors` | Small, typed control-plane HTTP API. |
-| [Zod](https://zod.dev/) | Validate task leases, runner configuration, and untrusted webhook/API input. |
-| TypeScript + `tsx` | Type-checking and fast local TypeScript execution. |
+| [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) | Pi CLI and RPC mode, executed inside a runner |
+| [Fastify](https://fastify.dev/) + `@fastify/cors` | Typed control-plane HTTP API |
+| [Zod](https://zod.dev/) | Validation for untrusted API, lease, and runner inputs |
+| TypeScript + `tsx` | Type checking and local TypeScript execution |
 
-Postgres, a durable queue, object storage, a GitHub App SDK, and a browser automation service are intentional **next** dependencies—not install-time assumptions. We should choose each after the task and runner protocol are stable.
+Postgres, a durable queue, object storage, a GitHub App SDK, and browser automation are intentional next dependencies—not install-time assumptions. Each should follow a concrete requirement in the task and runner protocol.
 
-## Local runner smoke test
-
-The compose service demonstrates the minimum container restrictions: non-root execution, read-only root filesystem, dropped Linux capabilities, PID/memory/CPU limits, and no network. It validates boot configuration only; it does **not** yet clone a repository or start Pi.
-
-```bash
-PI_CLOUD_TASK_LEASE=development-only \\
-  docker compose run --rm runner
-```
-
-The real runner will receive a signed, one-task lease from the control plane. Docker is strictly a local-development provider; hosted tasks will use disposable microVMs.
-
-## Near-term milestones
+## Roadmap
 
 1. Define authenticated task leases and a runner-to-control-plane event protocol.
-2. Provision a disposable local Docker runner with a non-root user, limits, and cleanup.
+2. Provision a disposable local runner with non-root execution, limits, and cleanup.
 3. Start Pi with `--mode rpc`, persist event streams, and support reconnecting to a task.
-4. Add GitHub App repository installation, scoped tokens, patch review, and pull-request creation.
-5. Move runner execution behind a self-hostable runner protocol before adding enterprise features.
+4. Add GitHub App installation, scoped tokens, patch review, and pull-request creation.
+5. Move execution behind a self-hostable runner protocol before adding enterprise features.
 
 ## Security baseline
 
-Treat every repository and Pi package as executable, untrusted input. The MVP must have per-task filesystem isolation, non-root execution, egress allowlisting, short-lived credentials, resource budgets, secret redaction in logs, an audit trail, and automatic destruction. Do not attach a runner to a developer machine or expose broad cloud credentials.
+Treat every repository and Pi package as executable, untrusted input. The MVP requires per-task filesystem isolation, non-root execution, egress allowlisting, short-lived credentials, resource budgets, secret redaction, an audit trail, and automatic destruction.
+
+Never attach a runner to a developer machine or expose broad cloud credentials. Pi Cloud retains only sanitized task output and must not depend on Pi's internal session-file format.
 
 ## Contributing
 
-This is early-stage by design. Prefer small, vertical slices that preserve the control-plane/runner boundary. Do not add a dependency merely to anticipate a future feature; document the concrete requirement first.
+Prefer small vertical slices that preserve the control-plane/runner boundary. Do not add a dependency merely to anticipate a future feature; document the concrete requirement first.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+[MIT](LICENSE)

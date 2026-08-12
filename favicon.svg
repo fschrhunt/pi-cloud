@@ -1,23 +1,4 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <rect width="1024" height="1024" rx="160" fill="#09090B"/>
-  <path fill-rule="evenodd" clip-rule="evenodd" d="M152 249H302.221H602.65V549.429H452.429V699.65H302.221V849.87H152V399.221V249ZM302.221 399.221V549.429H452.429V399.221H302.221Z" fill="white"/>
-  <path d="M602.65 549.429H752.871V849.87H602.65V549.429Z" fill="white"/>
-  <ellipse cx="723.007" cy="276.168" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="754.781" cy="276.168" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="786.552" cy="276.168" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="818.322" cy="276.168" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="850.093" cy="276.962" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="881.865" cy="276.168" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="786.552" cy="214.215" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="723.007" cy="214.215" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="754.781" cy="214.215" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="818.322" cy="214.215" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="723.007" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="691.238" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="754.781" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="786.552" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="850.093" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="818.322" cy="245.191" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="786.552" cy="183.238" rx="13.2379" ry="13.2379" fill="white"/>
-  <ellipse cx="754.781" cy="183.238" rx="13.2379" ry="13.2379" fill="white"/>
+  <path d="M332.174 452.174V332H572.522V452.174H692.696V572.348H812.87V692.522H332.174V572.348H212V452.174H332.174Z" fill="white"/>
 </svg>

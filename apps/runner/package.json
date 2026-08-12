@@ -4,14 +4,19 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prebuild": "npm run build --workspace=@pi-cloud/contracts",
     "build": "tsc -p tsconfig.json",
+    "precheck": "npm run build --workspace=@pi-cloud/contracts",
     "check": "tsc --noEmit -p tsconfig.json",
+    "predev": "npm run build --workspace=@pi-cloud/contracts",
     "dev": "tsx src/runner.ts",
     "start": "node dist/runner.js",
+    "pretest": "npm run build --workspace=@pi-cloud/contracts",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.1",
+    "@pi-cloud/contracts": "0.1.0",
     "zod": "^4.4.3"
   }
 }

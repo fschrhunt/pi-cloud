@@ -32,7 +32,7 @@ Agent creation records the authenticated creator/requester, API origin, exact re
 - `POST /internal/v1/leases/:leaseId/heartbeat` records monotonic usage and returns cancellation intent.
 - `POST /internal/v1/recovery` reaps expired unredeemed assignments and lost runners.
 
-Recovery first revokes the old assignment. It then applies bounded exponential backoff or records `infrastructure_retries_exhausted`; it never leaves two active leases for one run. Cancellation wins recovery races and becomes terminal. Heartbeats report CPU seconds, peak memory, artifact bytes, and provider usage when available. Runs also bound wall/idle time, events, and retries.
+Recovery first revokes the old assignment. It then applies bounded exponential backoff or records `infrastructure_retries_exhausted`; it never leaves two active leases for one run. Cancellation wins recovery races and becomes terminal. Heartbeats report CPU seconds, peak memory, artifact bytes, and provider usage when available. Wall time starts at lease redemption, while idle time follows runner heartbeats. Runs also bound events and retries.
 
 ## Durable events
 
@@ -44,6 +44,6 @@ Recovery first revokes the old assignment. It then applies bounded exponential b
 - `run.warning`
 - `run.result`
 
-Each event has a runner UUID, contiguous runner sequence, bounded typed payload, server timestamp, per-run monotonic sequence, and opaque cursor. Runner UUID retries are idempotent; changed duplicates, gaps, unknown kinds, extra payload fields, per-event overflow, and cumulative event-budget overflow fail closed. Raw tool inputs/outputs are not fields in this contract; runners must sanitize the short allowlisted messages before ingestion.
+Each event has a runner UUID, an assignment-local contiguous runner sequence, bounded typed payload, server timestamp, per-run monotonic sequence, and opaque cursor. A replacement runner starts its assignment-local sequence at one while the durable per-run sequence continues across attempts. Runner UUID retries are idempotent; changed duplicates, gaps, unknown kinds, extra payload fields, per-event overflow, and cumulative event-budget overflow fail closed. Raw tool inputs/outputs are not fields in this contract; runners must sanitize the short allowlisted messages before ingestion.
 
-`GET /v1/runs/:runId/events` streams stored events as SSE. Reconnect with the last opaque SSE ID through `Last-Event-ID` or `?cursor=`. The server replays only later events, emits heartbeat comments while following, and ends after a terminal run. `?follow=false` returns a bounded replay snapshot. Unknown or cross-run cursors fail closed; a cursor removed by retention tells the client to reload terminal run state.
+`GET /v1/runs/:runId/events` streams stored events as SSE in bounded database batches. Reconnect with the last opaque SSE ID through `Last-Event-ID` or `?cursor=`. The server replays only later events, emits heartbeat comments while following, and ends after a terminal run. `?follow=false` drains the available replay without holding the full tail in memory. Unknown or cross-run cursors fail closed; a cursor removed by retention tells the client to reload terminal run state.

@@ -50,13 +50,13 @@ Read [`docs/architecture.md`](docs/architecture.md) for component responsibiliti
 - Authenticated, SQLite-backed durable agents, finite runs, tasks, and lifecycle history
 - Cursor-paginated lifecycle API with idempotent create, follow-up, cancellation, archive, and delete contracts
 - Atomic runner dispatch and single-use, task-bound Ed25519 lease redemption
-- Persisted run budgets, heartbeats, bounded retry/recovery, and terminal reasons
+- Persisted run budgets, heartbeats, bounded retry/recovery, terminal reasons, and checkout provenance
 - Append-only allowlisted events with opaque-cursor SSE reconnect
-- Runner boot configuration and lease verification
-- Restrictive local Docker runner baseline
-- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect tests
+- Runner boot configuration, hardened exact checkout, and durable provenance reporting
+- Restrictive local Docker runner baseline with a bounded writable workspace
+- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect/checkout tests
 
-The current slice deliberately stops before repository checkout and Pi process startup. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
+The current slice deliberately stops before Pi process startup. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
 
 ## Quick start
 
@@ -97,28 +97,16 @@ curl -X POST http://localhost:3000/v1/agents \
   -H 'content-type: application/json' \
   -d '{
     "repositoryUrl": "https://github.com/pi-cloud/example",
-    "revision": "4f3c2d1",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
     "prompt": "Inspect the repository."
   }'
 ```
 
 The default database is `./data/pi-cloud.sqlite`. See the [durable control-plane API](docs/control-plane-api.md) for lifecycle, dispatch, event, and recovery endpoints.
 
-### Smoke-test the runner
+### Runner container baseline
 
-The Compose service boots as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and no network. Generate a development key pair, then mint a five-minute lease for a task UUID and exact revision:
-
-```bash
-eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
-npm run build --workspace=@pi-cloud/contracts
-export PI_CLOUD_TASK_LEASE="$(node scripts/create-development-lease.mjs \
-  a0d701e3-bae6-427a-bc22-35d885915da3 \
-  https://github.com/pi-cloud/example \
-  4f3c2d1)"
-docker compose run --rm runner
-```
-
-`PI_CLOUD_TASK_LEASE_PRIVATE_KEY` and `PI_CLOUD_TASK_LEASE_PUBLIC_KEY` must contain the generated pair. This validates boot configuration only. Docker is a local-development provider—not an adequate hosted multi-tenant boundary.
+The Compose service boots as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, no network, and a bounded writable workspace mounted at `/workspace`. Set `PI_CLOUD_RUNNER_ID`, mount a signed lease, and point `PI_CLOUD_CONTROL_PLANE_URL` at a reachable control plane only when the runner shares that network namespace. Docker remains a local-development provider—not an adequate hosted multi-tenant boundary.
 
 ## Repository map
 
@@ -157,7 +145,7 @@ Postgres/multi-node dispatch, object storage, a GitHub App SDK, and browser auto
 ## Roadmap
 
 1. **Complete:** durable agents/runs/tasks, single-use lease dispatch, bounded events, authentication, budgets, and recovery.
-2. Provision a disposable local runner with exact-revision checkout, policy enforcement, and cleanup.
+2. In progress: exact-revision checkout and durable provenance are implemented; environment policy, scoped secrets, and provider cleanup remain.
 3. Start Pi with `--mode rpc`, sanitize its event stream, and retain patches/artifacts.
 4. Add GitHub App installation, scoped tokens, patch review, and pull-request creation.
 5. Move execution behind a self-hostable runner protocol before adding enterprise features.

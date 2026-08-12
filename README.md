@@ -1,16 +1,13 @@
-<img src="./assets/logo.svg" width="220" alt="Pi Cloud logo">
+<p align="center">
+  <img src="./assets/logo.svg" width="220" alt="Pi Cloud logo">
+</p>
 
-**Secure, ephemeral coding environments for Pi.**
+> [!NOTE]
+> **Secure, ephemeral coding environments for Pi.**
 
 # Pi Cloud
 
 Connect a repository, launch an isolated runner, steer Pi in real time, and turn the resulting patch into a pull request.
-
-<p>
-  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-f97316">
-  <img alt="Node.js 22 or newer" src="https://img.shields.io/badge/node-%E2%89%A522-339933?logo=nodedotjs&logoColor=white">
-  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-18181b">
-</p>
 
 > [!WARNING]
 > Pi Cloud is **pre-alpha**. The repository contains a local vertical slice, not a production-ready sandbox. Do not use it to process untrusted repositories or real credentials yet.

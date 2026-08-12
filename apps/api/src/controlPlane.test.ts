@@ -1,35 +1,60 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
-import { verifyTaskLease } from "@pi-cloud/contracts";
+import type { ApiConfig } from "./config.js";
 import { ControlPlane } from "./controlPlane.js";
+import type { Principal } from "./domain.js";
 
-const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-const controlPlane = new ControlPlane({
+const { privateKey } = generateKeyPairSync("ed25519");
+const config: ApiConfig = {
   dispatcherToken: "development-dispatcher-token-32-characters",
   taskLeasePrivateKey: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
   taskLeaseIssuer: "pi-cloud-test",
-});
+  databasePath: ":memory:",
+  apiCredentials: [
+    {
+      token: "test-user-token-that-is-at-least-32-characters",
+      subjectId: "user-1",
+      type: "user",
+      displayName: "Test User",
+    },
+  ],
+};
+const principal: Principal = { id: "user-1", type: "user", displayName: "Test User" };
 
-test("control plane signs runner authority only for an existing queued task", () => {
-  const task = controlPlane.createTask({
-    repositoryUrl: "https://github.com/pi-cloud/example",
-    revision: "4f3c2d1",
-    prompt: "Inspect this repository.",
-  });
-  const lease = controlPlane.issueTaskLease(task.id, "runner-pool/local");
-
-  assert.ok(lease);
-  const claims = verifyTaskLease(lease, {
-    publicKey,
-    issuer: "pi-cloud-test",
-    audience: "runner-pool/local",
-  });
-  assert.equal(claims.taskId, task.id);
-  assert.equal(claims.repositoryUrl, task.repositoryUrl);
-  assert.equal(claims.revision, task.revision);
-  assert.equal(
-    controlPlane.issueTaskLease("a0d701e3-bae6-427a-bc22-35d885915da3", "runner-pool/local"),
-    undefined,
+test("finite follow-up runs serialize mutations and permanent deletion fails closed", () => {
+  const controlPlane = new ControlPlane(config);
+  const initial = controlPlane.createAgent(
+    principal,
+    {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision: "4f3c2d1",
+      prompt: "Inspect the repository.",
+    },
+    "agent-create-0001",
   );
+  controlPlane.cancelRun(principal, initial.run.id);
+  const followUp = controlPlane.createFollowUp(
+    principal,
+    initial.agent.id,
+    { prompt: "Now inspect the tests." },
+    "follow-up-create-0001",
+  );
+  const retry = controlPlane.createFollowUp(
+    principal,
+    initial.agent.id,
+    { prompt: "This body is ignored for the same idempotency key." },
+    "follow-up-create-0001",
+  );
+
+  assert.equal(followUp.number, 2);
+  assert.equal(retry.id, followUp.id);
+  assert.throws(() => controlPlane.deleteAgent(principal, initial.agent.id), /Active agents/);
+
+  controlPlane.cancelRun(principal, followUp.id);
+  assert.equal(controlPlane.archiveAgent(principal, initial.agent.id, true).status, "archived");
+  assert.equal(controlPlane.archiveAgent(principal, initial.agent.id, false).status, "active");
+  controlPlane.deleteAgent(principal, initial.agent.id);
+  assert.throws(() => controlPlane.getAgent(principal, initial.agent.id), /not found/);
+  controlPlane.close();
 });

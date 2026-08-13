@@ -1,6 +1,6 @@
 # Durable control-plane API
 
-Pi Cloud's first durable control-plane contract stores metadata in SQLite and keeps all repository execution in disposable runners. SQLite is the concrete pre-alpha requirement: one API process needs restart-safe transactional state without an external service. It is not the future multi-node queue; moving to Postgres will require preserving the transaction boundaries described below.
+Pi Cloud's first durable control-plane contract stores metadata in SQLite and keeps repository execution in the local Pi host rather than the network-facing API. SQLite is the intended single-server baseline: one API process needs restart-safe transactional state without an external service. If a concrete self-hosted use case later requires another database, it must preserve the transaction boundaries described below.
 
 `node:sqlite` requires Node 22.5 or newer. Migrations run transactionally when the API opens the configured `PI_CLOUD_DATABASE_PATH`. File databases use WAL, foreign keys, a busy timeout, and synchronous state transitions. Tests use the same migrations against in-memory or temporary file databases.
 

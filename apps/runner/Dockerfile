@@ -11,7 +11,11 @@ RUN npm run build --workspace=@pi-cloud/contracts && npm run build --workspace=@
 
 FROM node:22-bookworm-slim
 WORKDIR /opt/pi-cloud
-RUN groupadd --system --gid 10001 pi && useradd --system --uid 10001 --gid pi --create-home pi
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends ca-certificates git \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system --gid 10001 pi \
+ && useradd --system --uid 10001 --gid pi --create-home pi
 COPY --from=build /opt/pi-cloud/node_modules ./node_modules
 COPY --from=build /opt/pi-cloud/packages/contracts/package.json ./packages/contracts/package.json
 COPY --from=build /opt/pi-cloud/packages/contracts/dist ./packages/contracts/dist

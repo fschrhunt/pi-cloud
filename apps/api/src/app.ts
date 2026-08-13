@@ -139,6 +139,13 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
     return controlPlane.heartbeatLease(token, required(leaseId), request.body);
   });
 
+  app.post("/internal/v1/runs/:runId/checkout-provenance", async (request, reply) => {
+    const token = bearerToken(request.headers.authorization);
+    if (!token) throw unauthorized();
+    const { runId } = idParamsSchema.parse(request.params);
+    return reply.code(201).send(controlPlane.reportCheckoutProvenance(token, required(runId), request.body));
+  });
+
   app.post("/internal/v1/runs/:runId/events", async (request, reply) => {
     const token = bearerToken(request.headers.authorization);
     if (!token) throw unauthorized();

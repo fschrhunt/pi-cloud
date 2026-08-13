@@ -17,7 +17,7 @@ Create operations require an `Idempotency-Key` header (8–200 characters).
 - `POST /v1/agents` creates one durable agent, initial run, and dispatch task.
 - `GET /v1/agents` and `GET /v1/runs` return cursor-paginated owned records.
 - `GET /v1/agents/:agentId` returns the agent and its finite runs.
-- `GET /v1/runs/:runId` returns status, configured/consumed budgets, terminal reason, and transition history.
+- `GET /v1/runs/:runId` returns status, configured/consumed budgets, terminal reason, checkout provenance, and transition history.
 - `POST /v1/agents/:agentId/runs` adds a follow-up only when no mutating run is active.
 - `POST /v1/runs/:runId/cancel` persists cooperative cancellation intent.
 - `POST /v1/agents/:agentId/archive` and `/unarchive` change visibility without deleting evidence.
@@ -29,10 +29,11 @@ Agent creation records the authenticated creator/requester, API origin, exact re
 
 - `POST /internal/v1/runs/claim` atomically assigns the oldest eligible queued task to one runner and returns its signed lease.
 - `POST /internal/v1/leases/redeem` consumes that lease exactly once before execution.
+- `POST /internal/v1/runs/:runId/checkout-provenance` stores the hardened checkout evidence for the redeemed assignment.
 - `POST /internal/v1/leases/:leaseId/heartbeat` records monotonic usage and returns cancellation intent.
 - `POST /internal/v1/recovery` reaps expired unredeemed assignments and lost runners.
 
-Recovery first revokes the old assignment. It then applies bounded exponential backoff or records `infrastructure_retries_exhausted`; it never leaves two active leases for one run. Cancellation wins recovery races and becomes terminal. Heartbeats report CPU seconds, peak memory, artifact bytes, and provider usage when available. Wall time starts at lease redemption, while idle time follows runner heartbeats. Runs also bound events and retries.
+Recovery first revokes the old assignment. It then applies bounded exponential backoff or records `infrastructure_retries_exhausted`; it never leaves two active leases for one run. Cancellation wins recovery races and becomes terminal. Heartbeats report CPU seconds, peak memory, artifact bytes, and provider usage when available. Wall time starts at lease redemption, while idle time follows runner heartbeats. Runs also bound events and retries. Checkout provenance is written only by the authenticated redeemed runner and is replaced only by a later redeemed assignment for the same run.
 
 ## Durable events
 

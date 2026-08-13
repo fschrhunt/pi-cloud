@@ -1,17 +1,15 @@
 import { randomUUID, sign, timingSafeEqual, verify, type KeyObject } from "node:crypto";
 import { z } from "zod";
+import { immutableRevisionSchema, repositoryUrlSchema } from "./repository.js";
 
 const encodedPartSchema = z.string().regex(/^[A-Za-z0-9_-]+$/);
-const immutableRevisionSchema = z.string().regex(/^[a-f0-9]{7,64}$/i, "revision must be a Git commit SHA");
 const maximumLeaseLifetimeSeconds = 300;
 
 export const taskLeaseClaimsSchema = z.object({
   version: z.literal(1),
   leaseId: z.uuid(),
   taskId: z.uuid(),
-  repositoryUrl: z.url().refine((value) => new URL(value).protocol === "https:", {
-    message: "repositoryUrl must use HTTPS",
-  }),
+  repositoryUrl: repositoryUrlSchema,
   revision: immutableRevisionSchema,
   issuer: z.string().min(1),
   audience: z.string().min(1),

@@ -20,14 +20,14 @@
 
 ## Architecture and security
 
-- Preserve the control-plane/runner boundary: `apps/api` orchestrates and stores metadata; it must never execute repository code or mount task workspaces.
-- `apps/runner` is the only component that may clone repositories or invoke Pi. Treat repositories, dependencies, hooks, and project-local Pi extensions as untrusted code.
-- Design each runner for one task with a short-lived lease, bounded resources, scoped credentials, sanitized output, and guaranteed cleanup.
-- Deny network access by default and never place long-lived credentials in runner images, logs, events, patches, or fixtures.
-- Validate every external boundary with explicit schemas. Keep runner events and artifacts allowlisted and size-bounded.
-- Docker is only the local smoke-test provider, not a production multi-tenant security boundary.
-- Keep Pi integration behind its RPC/JSONL contract; do not depend on Pi's internal session-file format.
-- Do not add speculative infrastructure or dependencies. Document the concrete requirement before introducing a database, queue, storage service, or SDK.
+- Preserve the control-plane/Pi-host boundary: `apps/api` orchestrates and stores metadata; it must never execute repository code or mount workspaces.
+- `apps/runner` is the local Pi host included in the self-hosted installation. It owns repository workspaces and embeds `@earendil-works/pi-coding-agent` through the supported SDK.
+- Treat repositories, dependencies, hooks, and Pi extensions/packages as executable code. Honor Pi project trust and make optional container/VM isolation an operator choice.
+- Keep credentials out of images, logs, events, patches, and fixtures. Scope and redact credentials crossing process or network boundaries.
+- Validate every external boundary with explicit schemas. Keep remotely exposed Pi events and artifacts allowlisted and size-bounded.
+- Optimize for one open-source, always-on server and Docker Compose. Do not design around a proprietary hosted control plane, paid runner fleet, or enterprise multi-tenancy.
+- Preserve Pi's native extension, skill, prompt, theme, provider, package, setting, and session behavior through its public SDK; do not parse Pi's internal session files or create a competing plugin system.
+- Do not add speculative infrastructure or dependencies. Document the concrete self-hosted requirement before introducing a database, queue, storage service, or SDK.
 
 ## Code conventions
 

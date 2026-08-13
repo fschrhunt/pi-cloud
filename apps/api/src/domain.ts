@@ -1,9 +1,7 @@
+import { checkoutProvenanceSchema, immutableRevisionSchema, repositoryUrlSchema, type CheckoutProvenance } from "@pi-cloud/contracts";
 import { z } from "zod";
 
-export const repositoryUrlSchema = z.url().refine((value) => new URL(value).protocol === "https:", {
-  message: "repositoryUrl must use HTTPS",
-});
-export const revisionSchema = z.string().regex(/^[a-f0-9]{7,64}$/i, "revision must be a Git commit SHA");
+export const revisionSchema = immutableRevisionSchema;
 
 export const runStatusSchema = z.enum([
   "queued",
@@ -165,6 +163,7 @@ export type Run = {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  checkoutProvenance: CheckoutProvenance | null;
 };
 
 export type RunEvent = {
@@ -177,3 +176,5 @@ export type RunEvent = {
   kind: IngestRunEvent["kind"];
   payload: Record<string, unknown>;
 };
+
+export { checkoutProvenanceSchema };

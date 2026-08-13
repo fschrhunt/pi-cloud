@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementResultingChanges } from "node:sqlite";
+import type { CheckoutProvenance } from "@pi-cloud/contracts";
 import {
   runBudgetsSchema,
   runStatusSchema,
@@ -116,6 +117,23 @@ const migrations = [
     PRIMARY KEY(owner_id, scope, key)
   ) STRICT;
   `,
+  `
+  CREATE TABLE checkout_provenance (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL REFERENCES leases(lease_id) ON DELETE CASCADE,
+    repository_url TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    resolved_commit TEXT NOT NULL,
+    transport TEXT NOT NULL CHECK (transport IN ('https','local-fixture')),
+    credential_source TEXT NOT NULL CHECK (credential_source IN ('anonymous','short-lived-repository-token','local-fixture')),
+    credential_scrubbed INTEGER NOT NULL CHECK (credential_scrubbed = 1),
+    submodules_initialized INTEGER NOT NULL CHECK (submodules_initialized = 0),
+    hooks_disabled INTEGER NOT NULL CHECK (hooks_disabled = 1),
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+  ) STRICT;
+  `,
 ];
 
 type AgentRow = {
@@ -163,6 +181,21 @@ type LeaseRow = {
   expires_at: string;
   redeemed_at: string | null;
   revoked_at: string | null;
+};
+
+type CheckoutProvenanceRow = {
+  run_id: string;
+  lease_id: string;
+  repository_url: string;
+  revision: string;
+  resolved_commit: string;
+  transport: "https" | "local-fixture";
+  credential_source: "anonymous" | "short-lived-repository-token" | "local-fixture";
+  credential_scrubbed: 1;
+  submodules_initialized: 0;
+  hooks_disabled: 1;
+  started_at: string;
+  completed_at: string;
 };
 
 /** SQLite-backed control-plane metadata store with synchronous transactional state changes. */
@@ -333,7 +366,7 @@ export class ControlPlaneStore {
          WHERE runs.agent_id = ? ORDER BY runs.number ASC`,
       )
       .all(agentId) as unknown as RunRow[];
-    return rows.map(mapRun);
+    return rows.map((row) => ({ ...mapRun(row), checkoutProvenance: this.getCheckoutProvenance(row.id) }));
   }
 
   listRuns(ownerId: string, limit: number, afterCreatedAt?: string, afterId?: string): { items: Run[]; nextCursor: string | null } {
@@ -354,7 +387,9 @@ export class ControlPlaneStore {
           )
           .all(ownerId, limit + 1)) as unknown as RunRow[];
     const hasMore = rows.length > limit;
-    const items = rows.slice(0, limit).map(mapRun);
+    const items = rows
+      .slice(0, limit)
+      .map((row) => ({ ...mapRun(row), checkoutProvenance: this.getCheckoutProvenance(row.id) }));
     const last = items.at(-1);
     return { items, nextCursor: hasMore && last ? encodeListCursor(last.createdAt, last.id) : null };
   }
@@ -367,7 +402,7 @@ export class ControlPlaneStore {
          WHERE runs.id = ? AND agents.owner_id = ?`,
       )
       .get(runId, ownerId) as RunRow | undefined;
-    return row ? mapRun(row) : undefined;
+    return row ? { ...mapRun(row), checkoutProvenance: this.getCheckoutProvenance(runId) } : undefined;
   }
 
   requireRun(ownerId: string, runId: string): Run {
@@ -538,6 +573,91 @@ export class ControlPlaneStore {
       }
       const current = this.internalRun(run.id);
       return { cancelRequested: Boolean(current.cancelRequestedAt), run: current };
+    });
+  }
+
+  recordCheckoutProvenance(
+    tokenDigest: string,
+    runId: string,
+    provenance: CheckoutProvenance,
+    now: Date,
+  ): CheckoutProvenance {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const lease = this.requireRedeemedLeaseForRun(tokenDigest, runId);
+      const run = this.internalRun(runId);
+      if (terminalRunStatuses.has(run.status)) throw conflict("run_terminal", "Run is already terminal");
+      const authorized = this.database
+        .prepare(
+          `SELECT agents.repository_url, agents.revision FROM runs
+           JOIN agents ON agents.id = runs.agent_id WHERE runs.id = ?`,
+        )
+        .get(runId) as { repository_url: string; revision: string } | undefined;
+      if (
+        !authorized ||
+        provenance.transport !== "https" ||
+        provenance.repositoryUrl !== authorized.repository_url ||
+        provenance.revision !== authorized.revision ||
+        provenance.resolvedCommit !== authorized.revision
+      ) {
+        throw conflict(
+          "checkout_provenance_mismatch",
+          "Checkout provenance does not match the run's authorized repository revision",
+        );
+      }
+
+      const existing = this.database
+        .prepare("SELECT * FROM checkout_provenance WHERE run_id = ?")
+        .get(runId) as CheckoutProvenanceRow | undefined;
+      if (!existing) {
+        this.database
+          .prepare(
+            `INSERT INTO checkout_provenance
+             (run_id, lease_id, repository_url, revision, resolved_commit, transport, credential_source,
+              credential_scrubbed, submodules_initialized, hooks_disabled, started_at, completed_at, recorded_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 1, ?, ?, ?)`,
+          )
+          .run(
+            runId,
+            lease.lease_id,
+            provenance.repositoryUrl,
+            provenance.revision,
+            provenance.resolvedCommit,
+            provenance.transport,
+            provenance.credentialSource,
+            provenance.startedAt,
+            provenance.completedAt,
+            timestamp,
+          );
+        return provenance;
+      }
+
+      if (existing.lease_id === lease.lease_id) {
+        const recorded = mapCheckoutProvenance(existing);
+        if (JSON.stringify(recorded) !== JSON.stringify(provenance)) {
+          throw conflict("checkout_provenance_conflict", "Checkout provenance was already recorded for this assignment");
+        }
+        return recorded;
+      }
+
+      this.database
+        .prepare(
+          `UPDATE checkout_provenance SET lease_id = ?, repository_url = ?, revision = ?, resolved_commit = ?,
+           transport = ?, credential_source = ?, started_at = ?, completed_at = ?, recorded_at = ? WHERE run_id = ?`,
+        )
+        .run(
+          lease.lease_id,
+          provenance.repositoryUrl,
+          provenance.revision,
+          provenance.resolvedCommit,
+          provenance.transport,
+          provenance.credentialSource,
+          provenance.startedAt,
+          provenance.completedAt,
+          timestamp,
+          runId,
+        );
+      return provenance;
     });
   }
 
@@ -789,6 +909,13 @@ export class ControlPlaneStore {
     return lease;
   }
 
+  private getCheckoutProvenance(runId: string): CheckoutProvenance | null {
+    const row = this.database.prepare("SELECT * FROM checkout_provenance WHERE run_id = ?").get(runId) as
+      | CheckoutProvenanceRow
+      | undefined;
+    return row ? mapCheckoutProvenance(row) : null;
+  }
+
   private setRunAndTaskStatus(
     runId: string,
     taskId: string,
@@ -918,6 +1045,7 @@ function mapRun(row: RunRow): Run {
     updatedAt: row.updated_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    checkoutProvenance: null,
   };
 }
 
@@ -931,6 +1059,21 @@ function mapEvent(row: EventRow): RunEvent {
     timestamp: row.timestamp,
     kind: row.kind,
     payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+  };
+}
+
+function mapCheckoutProvenance(row: CheckoutProvenanceRow): CheckoutProvenance {
+  return {
+    repositoryUrl: row.repository_url,
+    revision: row.revision,
+    resolvedCommit: row.resolved_commit,
+    transport: row.transport,
+    credentialSource: row.credential_source,
+    credentialScrubbed: true,
+    submodulesInitialized: false,
+    hooksDisabled: true,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
   };
 }
 

@@ -12,6 +12,7 @@ const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const userToken = "test-user-token-that-is-at-least-32-characters";
 const otherToken = "other-user-token-that-is-at-least-32-characters";
 const dispatcherToken = "development-dispatcher-token-32-characters";
+const revision = "0123456789abcdef0123456789abcdef01234567";
 const authorization = { authorization: `Bearer ${userToken}` };
 
 function config(databasePath = ":memory:"): ApiConfig {
@@ -34,7 +35,7 @@ async function createAgent(app: Awaited<ReturnType<typeof buildApp>>, key = "age
     headers: { ...authorization, "idempotency-key": key },
     payload: {
       repositoryUrl: "https://github.com/pi-cloud/example",
-      revision: "4f3c2d1",
+      revision,
       prompt: "Explain the failure and propose a patch.",
       ...(budgets ? { budgets } : {}),
     },
@@ -56,6 +57,26 @@ async function redeem(app: Awaited<ReturnType<typeof buildApp>>, lease: string, 
     url: "/internal/v1/leases/redeem",
     headers: { authorization: `Bearer ${lease}` },
     payload: { runnerId },
+  });
+}
+
+async function reportCheckoutProvenance(app: Awaited<ReturnType<typeof buildApp>>, runId: string, lease: string) {
+  return app.inject({
+    method: "POST",
+    url: `/internal/v1/runs/${runId}/checkout-provenance`,
+    headers: { authorization: `Bearer ${lease}` },
+    payload: {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision,
+      resolvedCommit: revision,
+      transport: "https",
+      credentialSource: "anonymous",
+      credentialScrubbed: true,
+      submodulesInitialized: false,
+      hooksDisabled: true,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:01.000Z",
+    },
   });
 }
 
@@ -94,6 +115,23 @@ test("agent API authenticates, authorizes, paginates, and makes creates idempote
   assert.equal(busyFollowUp.statusCode, 409);
   assert.equal(busyFollowUp.json().code, "agent_busy");
 
+  await app.close();
+});
+
+test("agent creation rejects abbreviated revisions", async () => {
+  const app = await buildApp(config());
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/agents",
+    headers: { ...authorization, "idempotency-key": "invalid-revision-0001" },
+    payload: {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision: "4f3c2d1",
+      prompt: "Explain the failure and propose a patch.",
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
   await app.close();
 });
 
@@ -192,6 +230,44 @@ test("dispatch atomically assigns one runner and redeems a signed lease once", a
   assert.equal(redeemed.json().taskId, taskId);
   assert.equal(replay.statusCode, 409);
   assert.equal("lease" in redeemed.json(), false);
+
+  await app.close();
+});
+
+test("checkout provenance is recorded through the runner endpoint and returned in run detail", async () => {
+  const app = await buildApp(config());
+  const created = await createAgent(app, "checkout-provenance-0001");
+  const runId = created.json().run.id;
+  const lease = (await claim(app)).json().lease;
+  await redeem(app, lease);
+
+  const first = await reportCheckoutProvenance(app, runId, lease);
+  const retry = await reportCheckoutProvenance(app, runId, lease);
+  const detail = await app.inject({ method: "GET", url: `/v1/runs/${runId}`, headers: authorization });
+
+  assert.equal(first.statusCode, 201);
+  assert.deepEqual(retry.json(), first.json());
+  assert.deepEqual(detail.json().checkoutProvenance, first.json());
+
+  const mismatched = await app.inject({
+    method: "POST",
+    url: `/internal/v1/runs/${runId}/checkout-provenance`,
+    headers: { authorization: `Bearer ${lease}` },
+    payload: {
+      repositoryUrl: "https://github.com/pi-cloud/another",
+      revision,
+      resolvedCommit: revision,
+      transport: "https",
+      credentialSource: "anonymous",
+      credentialScrubbed: true,
+      submodulesInitialized: false,
+      hooksDisabled: true,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:01.000Z",
+    },
+  });
+  assert.equal(mismatched.statusCode, 409);
+  assert.equal(mismatched.json().code, "checkout_provenance_mismatch");
 
   await app.close();
 });

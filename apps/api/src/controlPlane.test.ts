@@ -21,6 +21,7 @@ const config: ApiConfig = {
   ],
 };
 const principal: Principal = { id: "user-1", type: "user", displayName: "Test User" };
+const revision = "0123456789abcdef0123456789abcdef01234567";
 
 test("finite follow-up runs serialize mutations and permanent deletion fails closed", () => {
   const controlPlane = new ControlPlane(config);
@@ -28,7 +29,7 @@ test("finite follow-up runs serialize mutations and permanent deletion fails clo
     principal,
     {
       repositoryUrl: "https://github.com/pi-cloud/example",
-      revision: "4f3c2d1",
+      revision,
       prompt: "Inspect the repository.",
     },
     "agent-create-0001",

@@ -50,13 +50,13 @@ Read [`docs/architecture.md`](docs/architecture.md) for component responsibiliti
 - Authenticated, SQLite-backed durable agents, finite runs, tasks, and lifecycle history
 - Cursor-paginated lifecycle API with idempotent create, follow-up, cancellation, archive, and delete contracts
 - Atomic runner dispatch and single-use, task-bound Ed25519 lease redemption
-- Persisted run budgets, heartbeats, bounded retry/recovery, and terminal reasons
+- Persisted run budgets, heartbeats, bounded retry/recovery, terminal reasons, and checkout provenance
 - Append-only allowlisted events with opaque-cursor SSE reconnect
-- Pi host boot configuration and lease verification
-- Restrictive local Docker execution baseline
-- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect tests
+- Pi host boot configuration, hardened exact checkout, and durable provenance reporting
+- Restrictive local Docker execution baseline with a bounded writable workspace
+- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect/checkout tests
 
-The current slice deliberately stops before repository checkout and an embedded Pi session. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
+The current slice deliberately stops before Pi process startup. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
 
 ## Quick start
 
@@ -97,28 +97,16 @@ curl -X POST http://localhost:3000/v1/agents \
   -H 'content-type: application/json' \
   -d '{
     "repositoryUrl": "https://github.com/pi-cloud/example",
-    "revision": "4f3c2d1",
+    "revision": "0123456789abcdef0123456789abcdef01234567",
     "prompt": "Inspect the repository."
   }'
 ```
 
 The default database is `./data/pi-cloud.sqlite`. See the [durable control-plane API](docs/control-plane-api.md) for lifecycle, dispatch, event, and recovery endpoints.
 
-### Smoke-test the Pi host
+### Pi host container baseline
 
-The current Compose service only verifies the execution host's boot boundary: non-root user, read-only filesystem, dropped Linux capabilities, resource limits, and no network. Generate a development key pair, then mint a five-minute lease for a task UUID and exact revision:
-
-```bash
-eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
-npm run build --workspace=@pi-cloud/contracts
-export PI_CLOUD_TASK_LEASE="$(node scripts/create-development-lease.mjs \
-  a0d701e3-bae6-427a-bc22-35d885915da3 \
-  https://github.com/pi-cloud/example \
-  4f3c2d1)"
-docker compose run --rm runner
-```
-
-`PI_CLOUD_TASK_LEASE_PRIVATE_KEY` and `PI_CLOUD_TASK_LEASE_PUBLIC_KEY` must contain the generated pair. This validates boot configuration only; it is not yet the self-hosted Pi runtime.
+The Compose service runs as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and a bounded writable workspace mounted at `/workspace`. The current service requires a lease assigned by the running control plane and network access to both that control plane and the authorized HTTPS repository; the checked-in no-network Compose policy must be overridden for that integration. It is a development baseline, not yet the self-hosted Pi runtime.
 
 ## Repository map
 

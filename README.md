@@ -156,11 +156,15 @@ Postgres/multi-node dispatch, object storage, a GitHub App SDK, and browser auto
 
 ## Roadmap
 
-1. **Complete:** durable agents/runs/tasks, single-use lease dispatch, bounded events, authentication, budgets, and recovery.
-2. Provision a disposable local runner with exact-revision checkout, policy enforcement, and cleanup.
-3. Start Pi with `--mode rpc`, sanitize its event stream, and retain patches/artifacts.
-4. Add GitHub App installation, scoped tokens, patch review, and pull-request creation.
-5. Move execution behind a self-hostable runner protocol before adding enterprise features.
+Milestones are ordered by usable product outcomes rather than internal components:
+
+1. **Complete — Durable control plane:** durable agents, runs, tasks, single-use lease dispatch, bounded events, authentication, budgets, and recovery.
+2. **Safe repository-ready runners:** exact-revision checkout, versioned setup, scoped secrets and egress, resource enforcement, and proven cleanup.
+3. **Local Pi agent loop:** Pi RPC execution, reconnectable sanitized events, follow-ups, cancellation, patches, and artifacts in one disposable local run.
+4. **GitHub-native private alpha:** repository authorization, a focused web review flow, and attributed draft pull-request delivery.
+5. **Safe hosted execution:** production isolation, usage limits, retention and audit controls, diagnostics, and failure-recovery evidence.
+6. **Portable prepared environments:** reproducible environment builds, customer-VPC runner pools, and authorized multi-repository work.
+7. **Integrations and automation:** the public API and explicit GitHub, Linear, Slack, webhook, and scheduled entry points over the same agent/run contract.
 
 ## Security baseline
 

@@ -1,6 +1,6 @@
 # Task leases
 
-A task lease is Pi Cloud's short-lived authorization for one runner to execute one immutable repository task. The control plane signs leases with Ed25519; runners receive only the public verification key and cannot mint authority.
+A task lease is Pi Cloud's short-lived authorization for the local Pi host to start one immutable repository operation. The control plane signs leases with Ed25519; the Pi host receives only the public verification key and cannot mint authority.
 
 ## Wire contract
 
@@ -22,7 +22,7 @@ Generate shell exports for a base64 DER key pair without writing unencrypted PEM
 eval "$(node scripts/create-development-keys.mjs)"
 ```
 
-Inspect scripts before evaluating their output. Store the private key only in the control-plane secret store. Mount only the public key into a runner. For the local Compose smoke test, build `@pi-cloud/contracts` and use `scripts/create-development-lease.mjs` as shown in the README; do not use these helpers as a hosted key-management or dispatch mechanism.
+Inspect scripts before evaluating their output. Store the private key only with the control-plane configuration. Mount only the public key into the Pi host. For the current Compose smoke test, build `@pi-cloud/contracts` and use `scripts/create-development-lease.mjs` as shown in the README; do not use these development helpers for a production self-hosted installation.
 
 ## Replay boundary
 

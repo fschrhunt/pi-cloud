@@ -182,6 +182,7 @@ test("restart argv resumes the native file with --session and scrubs the child e
   let scrubbed = false;
   let stateReceived!: () => void;
   let runtimeHome: string | undefined;
+  let runtimeTemp: string | undefined;
   const sawState = new Promise<void>((resolve) => { stateReceived = resolve; });
   const supervisor = new PiRpcSupervisor({
     launch,
@@ -190,7 +191,9 @@ test("restart argv resumes the native file with --session and scrubs the child e
     credentialEnvironment: { TEST_SECRET: "runtime-secret" },
     onRecord: (record) => {
       if (record.type === "response" && record.command === "get_state") {
-        runtimeHome = (record.data as { homeDirectory?: string }).homeDirectory;
+        const data = record.data as { homeDirectory?: string; tempDirectory?: string };
+        runtimeHome = data.homeDirectory;
+        runtimeTemp = data.tempDirectory;
         stateReceived();
       }
     },
@@ -205,6 +208,7 @@ test("restart argv resumes the native file with --session and scrubs the child e
     assert.deepEqual(argv, buildPiRpcArguments(launch));
     assert.deepEqual(argv.slice(-2), ["--session", launch.nativeSession.kind === "resume" ? launch.nativeSession.sessionFile : ""]);
     assert.equal(runtimeHome, join(root, "sessions", "runtime-home"));
+    assert.equal(runtimeTemp, join(root, "sessions", "runtime-home", "tmp"));
     assert.equal(scrubbed, true);
   } finally {
     await supervisor.cancel().catch(() => undefined);

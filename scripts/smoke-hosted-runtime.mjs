@@ -106,7 +106,8 @@ async function main() {
       resumedEntries,
     };
 
-    await deleteSession(config, session.id);
+    const archived = await archiveSession(config, session.id);
+    if (archived.state !== "archived") throw new Error(`Archive returned unexpected state: ${archived.state}`);
   } finally {
     for (const client of clients) await client.close().catch(() => undefined);
     for (const runner of runners) await runner.stop().catch(() => undefined);
@@ -395,12 +396,12 @@ async function stopSession(config, sessionId) {
   });
 }
 
-async function deleteSession(config, sessionId) {
+async function archiveSession(config, sessionId) {
   return requestJson(config, {
-    method: "DELETE",
-    path: `/v1/hosted-sessions/${sessionId}`,
+    method: "POST",
+    path: `/v1/hosted-sessions/${sessionId}/archive`,
     token: config.userToken,
-    expectedStatus: 204,
+    expectedStatus: 200,
   });
 }
 
@@ -652,6 +653,7 @@ class HostedClientConnection {
     this.sessionId = sessionId;
     this.secrets = secrets;
     this.sequence = 0;
+    this.inboundSequence = undefined;
     this.queue = [];
     this.waiters = [];
     this.closed = undefined;
@@ -663,6 +665,19 @@ class HostedClientConnection {
       }
       try {
         const envelope = JSON.parse(String(data));
+        if (envelope?.version !== 1 || envelope.direction !== "pi_to_client") {
+          throw new Error("Hosted client received an invalid envelope version or direction");
+        }
+        if (!Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1) {
+          throw new Error("Hosted client received an invalid envelope sequence");
+        }
+        if (this.inboundSequence !== undefined && envelope.sequence !== this.inboundSequence + 1) {
+          throw new Error("Hosted client received a non-contiguous envelope sequence");
+        }
+        if (!envelope.record || typeof envelope.record !== "object") {
+          throw new Error("Hosted client received an envelope without a native Pi record");
+        }
+        this.inboundSequence = envelope.sequence;
         this.push(envelope);
       } catch (error) {
         this.reject(error instanceof Error ? error : new Error(String(error)));

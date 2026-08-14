@@ -42,7 +42,6 @@ Hosted sessions:
 - `POST /v1/hosted-sessions/:sessionId/start`
 - `POST /v1/hosted-sessions/:sessionId/stop`
 - `POST /v1/hosted-sessions/:sessionId/archive`
-- `DELETE /v1/hosted-sessions/:sessionId`
 - `GET /v1/hosted-sessions/:sessionId/rpc` public authenticated WebSocket
 
 Internal worker endpoints:
@@ -218,7 +217,8 @@ Other important failures:
 - repository or path mismatches fail the runtime attempt; unconnected assignment authority expires after 60 seconds;
 - a `resume` launch without the persistent repository fails closed;
 - API restarts drop live sockets, revoke stale runtime assignments, and stop affected sessions; after an explicit restart, a replacement worker resumes Pi before clients reconnect through Pi state;
-- `archive` and `delete` require the session to be stopped first.
+- `archive` requires the session to be stopped and its runtime tunnel to be fully closed first;
+- metadata-only session deletion is intentionally unavailable because it would orphan persistent native data.
 
 ## Local Compose worker
 
@@ -234,4 +234,4 @@ Cleartext HTTP and WebSocket transport is accepted only for loopback and the Doc
 
 ## Smoke test
 
-`npm run smoke:hosted` starts a dedicated temporary API and exercises the public flow with a real built runner and Pi executable. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, deletes the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.
+`npm run smoke:hosted` starts a dedicated temporary API and exercises the public flow with a real built runner and Pi executable. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.

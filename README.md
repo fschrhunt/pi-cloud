@@ -81,7 +81,7 @@ See [docs/hosted-runtime.md](docs/hosted-runtime.md) for the operator contract. 
 
 ### Requirements
 
-- Node.js 22.5 or newer
+- Node.js 22.19 or newer
 - npm 11 or newer
 - Docker for the runner image and local smoke test
 

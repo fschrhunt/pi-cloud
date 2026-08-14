@@ -4,7 +4,7 @@ Pi Cloud's first durable control-plane contract stores metadata in SQLite and ke
 
 This document retains the original agent/run dispatch contract. The M2 workspace, hosted-session, and native Pi RPC transport are documented in [hosted-runtime.md](hosted-runtime.md). Both surfaces share authentication and the API/runtime execution boundary.
 
-`node:sqlite` requires Node 22.5 or newer. Migrations run transactionally when the API opens the configured `PI_CLOUD_DATABASE_PATH`. File databases use WAL, foreign keys, a busy timeout, and synchronous state transitions. Tests use the same migrations against in-memory or temporary file databases.
+Pi Cloud requires Node 22.19 or newer, which also satisfies `node:sqlite`. Migrations run transactionally when the API opens the configured `PI_CLOUD_DATABASE_PATH`. File databases use WAL, foreign keys, a busy timeout, and synchronous state transitions. Tests use the same migrations against in-memory or temporary file databases.
 
 ## Authentication
 

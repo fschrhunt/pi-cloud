@@ -66,7 +66,21 @@ async function removeWorkspace(workspacePath: string): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    await runRunner();
+    if (process.env.PI_CLOUD_HOSTED_DISPATCHER_TOKEN) {
+      const { runHostedRuntimeWorkerFromEnv } = await import("./hostedRuntimeConfig.js");
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      try {
+        await runHostedRuntimeWorkerFromEnv(process.env, controller.signal);
+      } finally {
+        process.off("SIGINT", stop);
+        process.off("SIGTERM", stop);
+      }
+    } else {
+      await runRunner();
+    }
   } catch (error: unknown) {
     console.error("Runner execution failed.");
     console.error(error);

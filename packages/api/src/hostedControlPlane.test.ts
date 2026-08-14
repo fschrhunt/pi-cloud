@@ -32,6 +32,7 @@ function config(overrides: Partial<ApiConfig> = {}): ApiConfig {
     hostedCredentialReferences: [
       { name: "provider", reference: "vault://provider/key", environmentVariable: "ANTHROPIC_API_KEY" },
     ],
+    hostedCredentialValues: { "vault://provider/key": "scoped-provider-secret" },
     ...overrides,
   };
 }
@@ -96,7 +97,12 @@ test("claiming a hosted runtime is atomic, mints a validated launch, and derives
 
   const workspace = controlPlane.createWorkspace(
     principal,
-    { repositoryUrl: "https://github.com/pi-cloud/example", revision, projectTrust: "trusted" },
+    {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision,
+      projectTrust: "trusted",
+      credentialReferenceNames: ["provider"],
+    },
     "workspace-claim",
   );
   const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-claim");
@@ -112,6 +118,8 @@ test("claiming a hosted runtime is atomic, mints a validated launch, and derives
     sessionDirectory: `/srv/pi-cloud/workspaces/${workspace.id}/native-sessions/${session.id}`,
   });
   assert.equal(claimed.launch.projectTrust, "trusted");
+  assert.deepEqual(claimed.credentials, [{ reference: "vault://provider/key", value: "scoped-provider-secret" }]);
+  assert.equal(JSON.stringify(workspace).includes("scoped-provider-secret"), false);
   assert.equal(claimed.tunnel.url, `wss://pi-cloud.example.com/internal/v1/hosted-sessions/${session.id}/tunnel`);
 
   const second = controlPlane.claimHostedRuntime({ runnerId: "runner-2" });

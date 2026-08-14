@@ -184,13 +184,13 @@ Symlink escapes fail closed.
 
 ## Credential references and redaction
 
-The API stores credential references, not values. A workspace requests references by name, the launch carries only `{ name, reference, environmentVariable }`, and the runner resolves them from `PI_CLOUD_HOSTED_CREDENTIALS` just before Pi starts.
+The database stores credential references, not values. The trusted API holds the operator's `PI_CLOUD_HOSTED_CREDENTIALS` map. A workspace requests references by name, and an authenticated claim returns only the values granted to that workspace. The long-lived runner container never receives the complete provider credential map in its startup environment.
 
 Credential values are:
 
-- never sent over the public or internal WebSocket;
-- not inherited from Pi Cloud control-plane environment variables;
-- scrubbed from runner memory after use;
+- sent only in the short-lived authenticated claim response, never through the public or RPC WebSocket;
+- mapped to the launch's allowlisted environment-variable names immediately before Pi starts;
+- scrubbed from claim and runner objects after use;
 - redacted from outbound Pi records and bounded stderr diagnostics.
 
 ## Limits and failure behavior
@@ -221,8 +221,8 @@ Other important failures:
 
 ## Local Compose worker
 
-The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
+The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`. Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
 
 ## Smoke test
 
-`npm run smoke:hosted` exercises the public flow with a real built runner and a real Pi executable. It requires an already-running local API, a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them.
+`npm run smoke:hosted` starts a dedicated temporary API and exercises the public flow with a real built runner and Pi executable. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, deletes the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.

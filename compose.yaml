@@ -10,13 +10,12 @@ services:
       dockerfile: packages/runner/Dockerfile
     restart: unless-stopped
     environment:
-      PI_CLOUD_HOSTED_DISPATCHER_URL: "${PI_CLOUD_HOSTED_DISPATCHER_URL:-http://host.docker.internal:3000}"
+      PI_CLOUD_HOSTED_DISPATCHER_URL: "${PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL:-http://host.docker.internal:3000}"
       PI_CLOUD_HOSTED_DISPATCHER_TOKEN: "${PI_CLOUD_HOSTED_DISPATCHER_TOKEN:-replace-with-at-least-32-random-characters}"
       PI_CLOUD_RUNNER_ID: "${PI_CLOUD_RUNNER_ID:-hosted-runner-local-1}"
       PI_CLOUD_HOSTED_WORKSPACE_ROOTS: "${PI_CLOUD_HOSTED_WORKSPACE_ROOTS:-/var/lib/pi-cloud/workspaces}"
       PI_CLOUD_HOSTED_SESSION_ROOTS: "${PI_CLOUD_HOSTED_SESSION_ROOTS:-/var/lib/pi-cloud/workspaces}"
       PI_CLOUD_HOSTED_AGENT_ROOTS: "${PI_CLOUD_HOSTED_AGENT_ROOTS:-/var/lib/pi-cloud/agent}"
-      PI_CLOUD_HOSTED_CREDENTIALS: "${PI_CLOUD_HOSTED_CREDENTIALS:-{}}"
       PI_CLOUD_PI_EXECUTABLE: "${PI_CLOUD_PI_EXECUTABLE:-pi}"
       HOME: /var/lib/pi-cloud/agent
     read_only: true

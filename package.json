@@ -15,6 +15,7 @@
     "check": "npm run check --workspaces --if-present",
     "dev:api": "npm run dev --workspace=@pi-cloud/api",
     "dev:runner": "npm run dev --workspace=@pi-cloud/runner",
+    "smoke:hosted": "node scripts/smoke-hosted-runtime.mjs",
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {

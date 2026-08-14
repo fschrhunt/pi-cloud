@@ -2,11 +2,13 @@
 
 Pi Cloud's first durable control-plane contract stores metadata in SQLite and keeps repository execution in the local Pi host rather than the network-facing API. SQLite is the intended single-server baseline: one API process needs restart-safe transactional state without an external service. If a concrete self-hosted use case later requires another database, it must preserve the transaction boundaries described below.
 
+This document retains the original agent/run dispatch contract. The M2 workspace, hosted-session, and native Pi RPC transport are documented in [hosted-runtime.md](hosted-runtime.md). Both surfaces share authentication and the API/runtime execution boundary.
+
 `node:sqlite` requires Node 22.5 or newer. Migrations run transactionally when the API opens the configured `PI_CLOUD_DATABASE_PATH`. File databases use WAL, foreign keys, a busy timeout, and synchronous state transitions. Tests use the same migrations against in-memory or temporary file databases.
 
 ## Authentication
 
-`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` routes require one of those tokens and constrain every agent, run, event stream, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned.
+`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` routes require one of those tokens and constrain every agent, run, workspace, hosted session, RPC attachment, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned.
 
 `PI_CLOUD_DISPATCHER_TOKEN` protects claim and recovery operations. A claimed runner receives a signed lease once. Redemption verifies its signature, expiry, audience, task, and assigned runner, then atomically marks it consumed. Later runner requests prove possession against the stored token hash, so heartbeats can extend assignment liveness without changing the signed lease's five-minute redemption lifetime.
 

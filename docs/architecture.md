@@ -1,6 +1,6 @@
 # Architecture
 
-Read [product-scope.md](product-scope.md) for the product contract.
+Read [product-scope.md](product-scope.md) for the product contract and [hosted-runtime.md](hosted-runtime.md) for the operator-facing M2 wire contract.
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Pi Cloud makes an unmodified Pi session available from another device. It separa
 ```text
 browser / CLI / local Pi extension
                  │
-      authenticated HTTP + stream
+   authenticated HTTP + WebSocket
                  ▼
        API and session router (`packages/api`)
                  │
@@ -31,7 +31,7 @@ The first deployment runs the API and runtime worker on one operator-owned Linux
 
 `packages/api` authenticates clients, authorizes workspace and hosted-session access, stores lifecycle metadata, starts or attaches runtime workers, and routes the public bidirectional stream.
 
-HTTP handles create, list, attach, stop, archive, and delete operations. The bidirectional stream carries a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
+HTTP handles create, list, get, start, stop, archive, and delete operations. Authenticated public and internal WebSockets carry a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
 
 ## Runtime worker
 
@@ -102,14 +102,17 @@ Reconnect uses Pi RPC state and entry cursors. Cloud metadata records connection
 
 Persistent data includes workspace files, Git metadata, operator Pi resources, opaque native Pi sessions, and lifecycle metadata. Runtime processes, temporary files, and injected operation credentials have bounded lifetimes.
 
-## First vertical slice
+## Current vertical slice
 
 ```text
 open one workspace
+→ claim one hosted runtime
 → start unmodified Pi RPC in the runner
 → attach an authenticated client
 → prompt and stream native Pi events
 → disconnect and reconnect
-→ resume the same native Pi session
-→ stop the process while retaining the workspace
+→ stop and restart the runtime
+→ resume the same native Pi session in the same workspace
 ```
+
+This slice now works end-to-end for one operator-owned server. It remains pre-alpha and does not yet provide multi-tenant hardening or production pooling.

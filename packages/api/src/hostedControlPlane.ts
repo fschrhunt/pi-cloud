@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { hostedRuntimeLaunchSchema, type HostedRuntimeLaunch } from "@pi-cloud/contracts";
+import { hostedRuntimeClaimSchema, hostedRuntimeLaunchSchema, type HostedRuntimeClaim } from "@pi-cloud/contracts";
 import { z } from "zod";
 import type { ApiConfig } from "./config.js";
 import {
@@ -99,8 +99,8 @@ export class HostedControlPlane {
     this.router.close();
   }
 
-  /** Atomically claims the oldest queued session and mints its one-shot dispatcher response. */
-  claimHostedRuntime(input: unknown): { launch: HostedRuntimeLaunch; tunnel: { url: string; token: string } } | undefined {
+  /** Atomically claims the oldest queued session and returns only that workspace's credential values. */
+  claimHostedRuntime(input: unknown): HostedRuntimeClaim | undefined {
     const { runnerId } = claimRequestSchema.parse(input);
     const assignmentId = randomUUID();
     const token = randomBytes(32).toString("base64url");
@@ -122,7 +122,15 @@ export class HostedControlPlane {
       limits: this.config.hostedLaunchLimits,
       projectTrust: workspace.projectTrust,
     });
-    return { launch, tunnel: { url: tunnelUrl(this.config.publicBaseUrl, session.id), token } };
+    const credentials = workspace.credentialReferences.map((credential) => ({
+      reference: credential.reference,
+      value: this.config.hostedCredentialValues[credential.reference],
+    }));
+    return hostedRuntimeClaimSchema.parse({
+      launch,
+      credentials,
+      tunnel: { url: tunnelUrl(this.config.publicBaseUrl, session.id), token },
+    });
   }
 
   /** Authorizes an internal tunnel connection by the raw assignment token presented in its bearer header. */

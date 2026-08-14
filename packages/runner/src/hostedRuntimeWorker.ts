@@ -15,6 +15,7 @@ import WebSocket, { type RawData } from "ws";
 import { checkoutExactRevision } from "./checkout.js";
 import { authorizeHostedRuntimeRealPaths, type HostedRuntimeAuthorizedRoots } from "./pathAuthorization.js";
 import { PiRpcSupervisor } from "./piRpcSupervisor.js";
+import { prepareIsolatedWorkspace, type RuntimeProcessIdentity } from "./workspaceIdentity.js";
 
 const execFileAsync = promisify(execFile);
 const stopControlSchema = z
@@ -36,6 +37,7 @@ export type HostedRuntimeWorkerOptions = {
   runnerId: string;
   authorizedRoots: HostedRuntimeAuthorizedRoots;
   piExecutable?: string;
+  processIsolation?: "inherit" | "workspace_uid";
   checkout?: typeof checkoutExactRevision;
   createWebSocket?: (url: string, token: string) => WebSocket;
   signal?: AbortSignal;
@@ -77,9 +79,13 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   } finally {
     scrubClaimCredentials(claim);
   }
+  let processIdentity: RuntimeProcessIdentity | undefined;
   try {
     await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
     await materializeRepository(launch, options.checkout ?? checkoutExactRevision);
+    if (options.processIsolation === "workspace_uid") {
+      processIdentity = await prepareIsolatedWorkspace(launch);
+    }
   } catch (error: unknown) {
     scrubResolvedCredentials(credentials);
     throw error;
@@ -106,6 +112,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
       piExecutable: options.piExecutable,
       credentialEnvironment: credentials.environment,
       configuredSecrets: [...credentials.secrets, ...Object.values(credentials.environment)],
+      processIdentity,
       onRecord: (record) => {
         if (socket.readyState !== WebSocket.OPEN) return;
         const envelope = {

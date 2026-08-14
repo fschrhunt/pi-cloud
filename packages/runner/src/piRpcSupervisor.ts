@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import type { HostedRuntimeLaunch, PiRpcClientCommand, PiRpcRecord } from "@pi-cloud/contracts";
 import { StrictJsonlParser } from "./jsonl.js";
 import { nativeSessionDirectory, runtimeHomeDirectory } from "./pathAuthorization.js";
+import type { RuntimeProcessIdentity } from "./workspaceIdentity.js";
 import { BoundedStderrDiagnostic, redactRecord } from "./redaction.js";
 
 export type PiRpcSupervisorOptions = {
@@ -11,6 +12,7 @@ export type PiRpcSupervisorOptions = {
   environment?: NodeJS.ProcessEnv;
   credentialEnvironment?: Readonly<Record<string, string>>;
   configuredSecrets?: readonly string[];
+  processIdentity?: RuntimeProcessIdentity;
   stderrMaxBytes?: number;
   onRecord: (record: PiRpcRecord) => void;
   onEnvironmentScrubbed?: () => void;
@@ -96,6 +98,7 @@ export class PiRpcSupervisor {
         env: this.childEnvironment,
         shell: false,
         detached: process.platform !== "win32",
+        ...(options.processIdentity ?? {}),
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error: unknown) {

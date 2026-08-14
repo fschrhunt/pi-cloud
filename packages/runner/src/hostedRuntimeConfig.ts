@@ -10,6 +10,7 @@ const hostedWorkerConfigSchema = z.object({
   workspaceRoots: z.string().min(1),
   sessionRoots: z.string().min(1),
   agentRoots: z.string().min(1),
+  processIsolation: z.enum(["workspace_uid", "inherit"]).default("workspace_uid"),
   piExecutable: z.string().min(1).optional(),
 });
 
@@ -25,6 +26,7 @@ export async function runHostedRuntimeWorkerFromEnv(
     workspaceRoots: env.PI_CLOUD_HOSTED_WORKSPACE_ROOTS,
     sessionRoots: env.PI_CLOUD_HOSTED_SESSION_ROOTS,
     agentRoots: env.PI_CLOUD_HOSTED_AGENT_ROOTS,
+    processIsolation: env.PI_CLOUD_HOSTED_PROCESS_ISOLATION,
     piExecutable: env.PI_CLOUD_PI_EXECUTABLE,
   });
   const dispatcherUrl = parseControlPlaneUrl(config.dispatcherUrl);
@@ -38,6 +40,7 @@ export async function runHostedRuntimeWorkerFromEnv(
       agentRoots: parseRoots(config.agentRoots),
     },
     piExecutable: config.piExecutable,
+    processIsolation: config.processIsolation,
     signal,
   });
 }

@@ -19,6 +19,17 @@ const config: ApiConfig = {
       displayName: "Test User",
     },
   ],
+  publicBaseUrl: "http://127.0.0.1:0",
+  runtimeWorkspaceRoot: "/srv/pi-cloud/workspaces",
+  runtimeAgentDirectory: "/srv/pi-cloud/agent",
+  hostedLaunchLimits: {
+    wallTimeSeconds: 3_600,
+    idleTimeSeconds: 300,
+    terminationGraceSeconds: 5,
+    maxRecordBytes: 65_536,
+    maxCumulativeBytes: 10_000_000,
+  },
+  hostedCredentialReferences: [],
 };
 const principal: Principal = { id: "user-1", type: "user", displayName: "Test User" };
 const revision = "0123456789abcdef0123456789abcdef01234567";

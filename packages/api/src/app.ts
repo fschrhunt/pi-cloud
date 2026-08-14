@@ -1,14 +1,30 @@
 import { Readable } from "node:stream";
 import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import type WebSocket from "ws";
 import { ZodError, z } from "zod";
 import { Authenticator, bearerToken, hasBearerToken } from "./auth.js";
 import type { ApiConfig } from "./config.js";
 import { ControlPlane } from "./controlPlane.js";
-import type { Principal, RunEvent } from "./domain.js";
+import type { HostedSession, Principal, RunEvent, Workspace } from "./domain.js";
 import { ApiError, unauthorized } from "./errors.js";
+import { HostedControlPlane } from "./hostedControlPlane.js";
 
-const idParamsSchema = z.object({ agentId: z.string().uuid().optional(), runId: z.string().uuid().optional(), leaseId: z.string().uuid().optional() });
+declare module "fastify" {
+  interface FastifyRequest {
+    hostedClientSession?: HostedSession;
+    hostedRuntimeAssignment?: { assignmentId: string; session: HostedSession; workspace: Workspace };
+  }
+}
+
+const idParamsSchema = z.object({
+  agentId: z.string().uuid().optional(),
+  runId: z.string().uuid().optional(),
+  leaseId: z.string().uuid().optional(),
+  workspaceId: z.string().uuid().optional(),
+  sessionId: z.string().uuid().optional(),
+});
 
 /** Builds the authenticated control-plane HTTP surface without binding a port. */
 export async function buildApp(config: ApiConfig, clock?: () => Date) {
@@ -18,9 +34,12 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
     },
   });
   const controlPlane = new ControlPlane(config, clock);
+  const hostedControlPlane = new HostedControlPlane(config, controlPlane.store, clock);
   const authenticator = new Authenticator(config.apiCredentials);
 
   await app.register(cors, { origin: false });
+  await app.register(websocket);
+  app.addHook("preClose", async () => hostedControlPlane.close());
   app.addHook("onClose", async () => controlPlane.close());
 
   app.setErrorHandler((error, request, reply) => {
@@ -119,6 +138,110 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
       ),
     );
   });
+
+  app.post("/v1/workspaces", async (request, reply) => {
+    const workspace = hostedControlPlane.createWorkspace(
+      principal(request.headers.authorization),
+      request.body,
+      request.headers["idempotency-key"],
+    );
+    return reply.code(201).send(workspace);
+  });
+
+  app.get("/v1/workspaces", async (request) =>
+    hostedControlPlane.listWorkspaces(principal(request.headers.authorization), request.query),
+  );
+
+  app.get("/v1/workspaces/:workspaceId", async (request) => {
+    const { workspaceId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.getWorkspace(principal(request.headers.authorization), required(workspaceId));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions", async (request, reply) => {
+    const { workspaceId } = idParamsSchema.parse(request.params);
+    const session = hostedControlPlane.createHostedSession(
+      principal(request.headers.authorization),
+      required(workspaceId),
+      request.body,
+      request.headers["idempotency-key"],
+    );
+    return reply.code(201).send(session);
+  });
+
+  app.get("/v1/hosted-sessions/:sessionId", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.getHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/start", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.startHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/stop", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.stopHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/archive", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.archiveHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.delete("/v1/hosted-sessions/:sessionId", async (request, reply) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    hostedControlPlane.deleteHostedSession(principal(request.headers.authorization), required(sessionId));
+    return reply.code(204).send();
+  });
+
+  app.get(
+    "/v1/hosted-sessions/:sessionId/rpc",
+    {
+      websocket: true,
+      preHandler: async (request) => {
+        const { sessionId } = idParamsSchema.parse(request.params);
+        const caller = principal(request.headers.authorization);
+        request.hostedClientSession = hostedControlPlane.authorizeClientConnection(caller, required(sessionId));
+      },
+    },
+    (socket: WebSocket, request) => {
+      const session = request.hostedClientSession as HostedSession;
+      hostedControlPlane.router.attachClient(session.id, socket);
+    },
+  );
+
+  app.post("/internal/v1/hosted-runtimes/claim", async (request, reply) => {
+    requireDispatcher(request.headers.authorization, config.dispatcherToken);
+    const claim = hostedControlPlane.claimHostedRuntime(request.body);
+    return claim ? reply.code(201).send(claim) : reply.code(204).send();
+  });
+
+  app.get(
+    "/internal/v1/hosted-sessions/:sessionId/tunnel",
+    {
+      websocket: true,
+      preHandler: async (request) => {
+        const { sessionId } = idParamsSchema.parse(request.params);
+        const token = bearerToken(request.headers.authorization);
+        if (!token) throw unauthorized();
+        const id = required(sessionId);
+        request.hostedRuntimeAssignment = hostedControlPlane.authorizeRuntimeAssignment(id, token);
+        if (hostedControlPlane.router.hasRuntime(id)) {
+          throw new ApiError(409, "runtime_already_connected", "Hosted session runtime is already connected");
+        }
+      },
+    },
+    (socket: WebSocket, request) => {
+      const assignment = request.hostedRuntimeAssignment as NonNullable<typeof request.hostedRuntimeAssignment>;
+      hostedControlPlane.router.attachRuntime({
+        sessionId: assignment.session.id,
+        assignmentId: assignment.assignmentId,
+        workspaceRoot: assignment.workspace.root,
+        limits: config.hostedLaunchLimits,
+        socket,
+      });
+    },
+  );
 
   app.post("/internal/v1/runs/claim", async (request, reply) => {
     requireDispatcher(request.headers.authorization, config.dispatcherToken);

@@ -152,7 +152,7 @@ async function readConfig(env) {
       apiPort,
       repositoryUrl,
       revision,
-      projectTrust: env.PI_CLOUD_SMOKE_PROJECT_TRUST === "trusted" ? "trusted" : "untrusted",
+      projectTrust: parseProjectTrust(env.PI_CLOUD_SMOKE_PROJECT_TRUST),
       prompt: env.PI_CLOUD_SMOKE_PROMPT ?? `Reply with the exact text ${expectedMarker} on a single line.`,
       expectedMarker,
       userToken,
@@ -567,6 +567,7 @@ class RunnerProcess {
       PI_CLOUD_HOSTED_WORKSPACE_ROOTS: config.workspaceRoots,
       PI_CLOUD_HOSTED_SESSION_ROOTS: config.sessionRoots,
       PI_CLOUD_HOSTED_AGENT_ROOTS: config.agentRoots,
+      PI_CLOUD_HOSTED_PROCESS_ISOLATION: "inherit",
       ...(config.piExecutable ? { PI_CLOUD_PI_EXECUTABLE: config.piExecutable } : {}),
     };
     this.child = spawn(process.execPath, [runnerEntry], {
@@ -865,6 +866,12 @@ function parseUrl(value, sourceName) {
 function required(value, name) {
   if (!value) throw new Error(`Missing ${name}`);
   return value;
+}
+
+function parseProjectTrust(value) {
+  if (value === undefined || value === "untrusted") return "untrusted";
+  if (value === "trusted") return "trusted";
+  throw new Error("PI_CLOUD_SMOKE_PROJECT_TRUST must be trusted or untrusted");
 }
 
 function joinPath(prefix, existing) {

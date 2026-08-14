@@ -22,6 +22,7 @@ Hosted runner:
 - `PI_CLOUD_HOSTED_WORKSPACE_ROOTS`
 - `PI_CLOUD_HOSTED_SESSION_ROOTS`
 - `PI_CLOUD_HOSTED_AGENT_ROOTS`
+- `PI_CLOUD_HOSTED_PROCESS_ISOLATION` (`workspace_uid` for untrusted execution)
 - optional `PI_CLOUD_PI_EXECUTABLE`
 
 See [../.env.example](../.env.example) for a local single-operator example.
@@ -223,7 +224,13 @@ Other important failures:
 
 The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`.
 
-The shared operator Pi agent directory is mounted read-only. Pi receives a writable `HOME` under its hosted session directory, so one repository cannot persist settings or extensions into the shared source used by later workspaces. Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
+Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. The shared operator Pi agent directory is mounted read-only.
+
+The trusted root supervisor keeps dispatcher authority and the full workspace volume. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives a writable `HOME` under its own hosted session directory.
+
+Compose retains workspace data until the operator explicitly removes the local provider volume. After deleting or archiving any metadata that must be retained, run `docker compose down --volumes` to remove all local checkouts and native session files. Per-workspace physical deletion is not part of this M2 Docker provider.
+
+Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
 
 ## Smoke test
 

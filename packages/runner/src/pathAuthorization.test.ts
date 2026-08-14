@@ -36,6 +36,41 @@ test("path authorization permits descendants and rejects lexical prefix and trav
   assert.throws(() => authorizeHostedRuntimePaths({ ...launch, workspaceRoot: "/srv/workspaces/../outside" }, roots), /escapes/);
 });
 
+test("runtime home cannot link into another persistent session", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "pi-cloud-home-auth-"));
+  const workspaces = join(root, "workspaces");
+  const sessions = join(root, "sessions");
+  const agents = join(root, "agents");
+  const sessionOne = join(sessions, "one");
+  const sessionTwo = join(sessions, "two");
+  await Promise.all([workspaces, sessions, agents].map((path) => fs.mkdir(path)));
+  await Promise.all([
+    fs.mkdir(join(workspaces, "one")),
+    fs.mkdir(sessionOne),
+    fs.mkdir(sessionTwo),
+    fs.mkdir(join(agents, "default")),
+  ]);
+  await fs.symlink(sessionTwo, join(sessionOne, "runtime-home"));
+  const linkedLaunch = {
+    ...launch,
+    workspaceRoot: join(workspaces, "one"),
+    nativeSession: { kind: "new" as const, sessionDirectory: sessionOne },
+    piAgentDirectory: join(agents, "default"),
+  };
+  try {
+    await assert.rejects(
+      authorizeHostedRuntimeRealPaths(linkedLaunch, {
+        workspaceRoots: [workspaces],
+        sessionRoots: [sessions],
+        agentRoots: [agents],
+      }),
+      /escapes its session/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("real path authorization rejects a symlink escape", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "pi-cloud-path-auth-"));
   const workspaces = join(root, "workspaces");

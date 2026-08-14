@@ -41,6 +41,7 @@ process.stdin.on("data", (chunk) => {
           sessionFile,
           sessionId: "native-1",
           credentialPresent: process.env.ANTHROPIC_API_KEY === "scoped-secret",
+          homeDirectory: process.env.HOME,
         },
       });
     } else if (command.type === "prompt") {

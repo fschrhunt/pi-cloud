@@ -181,6 +181,7 @@ test("restart argv resumes the native file with --session and scrubs the child e
   const argvPath = join(root, "argv.jsonl");
   let scrubbed = false;
   let stateReceived!: () => void;
+  let runtimeHome: string | undefined;
   const sawState = new Promise<void>((resolve) => { stateReceived = resolve; });
   const supervisor = new PiRpcSupervisor({
     launch,
@@ -188,7 +189,10 @@ test("restart argv resumes the native file with --session and scrubs the child e
     environment: { PATH: process.env.PATH, PI_CLOUD_FIXTURE_ARGV: argvPath },
     credentialEnvironment: { TEST_SECRET: "runtime-secret" },
     onRecord: (record) => {
-      if (record.type === "response" && record.command === "get_state") stateReceived();
+      if (record.type === "response" && record.command === "get_state") {
+        runtimeHome = (record.data as { homeDirectory?: string }).homeDirectory;
+        stateReceived();
+      }
     },
     onEnvironmentScrubbed: () => { scrubbed = true; },
   });
@@ -200,6 +204,7 @@ test("restart argv resumes the native file with --session and scrubs the child e
     const argv = JSON.parse((await fs.readFile(argvPath, "utf8")).trim()) as string[];
     assert.deepEqual(argv, buildPiRpcArguments(launch));
     assert.deepEqual(argv.slice(-2), ["--session", launch.nativeSession.kind === "resume" ? launch.nativeSession.sessionFile : ""]);
+    assert.equal(runtimeHome, join(root, "sessions", "runtime-home"));
     assert.equal(scrubbed, true);
   } finally {
     await supervisor.cancel().catch(() => undefined);

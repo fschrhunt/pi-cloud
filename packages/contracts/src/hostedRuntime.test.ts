@@ -40,6 +40,13 @@ test("hosted runtime launch requires immutable, absolute, explicitly trusted inp
     ...launch,
     credentialReferences: [...launch.credentialReferences, ...launch.credentialReferences],
   }));
+  assert.throws(() => hostedRuntimeLaunchSchema.parse({
+    ...launch,
+    credentialReferences: [
+      ...launch.credentialReferences,
+      { name: "provider-copy", reference: "vault://provider/key", environmentVariable: "ANTHROPIC_API_KEY_COPY" },
+    ],
+  }), /references must be unique/);
 
   const claim = {
     launch,

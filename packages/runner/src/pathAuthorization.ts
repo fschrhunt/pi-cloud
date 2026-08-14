@@ -46,6 +46,16 @@ async function authorizeRealPath(name: string, candidate: string, roots: readonl
   throw new Error(`${name} escapes its authorized roots through a symbolic link`);
 }
 
+async function authorizeRealDescendant(name: string, candidate: string, root: string): Promise<void> {
+  const [realCandidate, realRoot] = await Promise.all([
+    resolveThroughExistingAncestor(candidate),
+    resolveThroughExistingAncestor(root),
+  ]);
+  if (!contains(realRoot, realCandidate)) {
+    throw new Error(`${name} escapes its session through a symbolic link`);
+  }
+}
+
 async function resolveThroughExistingAncestor(candidate: string): Promise<string> {
   let existing = resolve(candidate);
   const missing: string[] = [];
@@ -77,6 +87,7 @@ export async function authorizeHostedRuntimeRealPaths(
       authorizedRoots.sessionRoots,
     ),
     authorizeRealPath("piAgentDirectory", launch.piAgentDirectory, authorizedRoots.agentRoots),
+    authorizeRealDescendant("runtimeHomeDirectory", runtimeHomeDirectory(launch), nativeSessionDirectory(launch)),
   ]);
 }
 
@@ -85,4 +96,9 @@ export function nativeSessionDirectory(launch: HostedRuntimeLaunch): string {
   return launch.nativeSession.kind === "new"
     ? launch.nativeSession.sessionDirectory
     : dirname(launch.nativeSession.sessionFile);
+}
+
+/** Returns the per-session writable home, isolated from the shared read-only Pi agent directory. */
+export function runtimeHomeDirectory(launch: HostedRuntimeLaunch): string {
+  return resolve(nativeSessionDirectory(launch), "runtime-home");
 }

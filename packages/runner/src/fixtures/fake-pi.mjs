@@ -31,7 +31,17 @@ process.stdin.on("data", (chunk) => {
     const command = JSON.parse(pending.subarray(0, newline).toString("utf8"));
     pending = pending.subarray(newline + 1);
     if (command.type === "get_state") {
-      emit({ id: command.id, type: "response", command: "get_state", success: true, data: { sessionFile, sessionId: "native-1" } });
+      emit({
+        id: command.id,
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: {
+          sessionFile,
+          sessionId: "native-1",
+          credentialPresent: process.env.ANTHROPIC_API_KEY === "scoped-secret",
+        },
+      });
     } else if (command.type === "prompt") {
       if (process.env.PI_CLOUD_FIXTURE_MODE === "exit-on-prompt") process.exit(7);
       emit({ id: command.id, type: "response", command: "prompt", success: true });

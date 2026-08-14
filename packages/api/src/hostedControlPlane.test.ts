@@ -162,7 +162,9 @@ test("a runtime disconnect closes its assignment after an explicit stop so the s
 
   assert.equal(controlPlane.stopHostedSession(principal, session.id).state, "stopped");
   store.markHostedSessionStoppedByRuntime(session.id, new Date());
-  assert.equal(controlPlane.startHostedSession(principal, session.id).state, "queued");
+  const restarted = controlPlane.startHostedSession(principal, session.id);
+  assert.equal(restarted.state, "queued");
+  assert.equal(restarted.stoppedAt, null);
   assert.ok(controlPlane.claimHostedRuntime({ runnerId: "runner-2" }));
 });
 

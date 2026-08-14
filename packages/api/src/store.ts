@@ -1102,6 +1102,7 @@ export class ControlPlaneStore {
         .get(session.workspaceId, sessionId);
       if (active) throw conflict("workspace_session_active", "Workspace already has an active hosted session");
       this.transitionHostedSession(sessionId, session.state, "queued", "start_requested", timestamp);
+      this.database.prepare("UPDATE hosted_sessions SET stopped_at = NULL WHERE id = ?").run(sessionId);
       return this.requireHostedSession(ownerId, sessionId);
     });
   }

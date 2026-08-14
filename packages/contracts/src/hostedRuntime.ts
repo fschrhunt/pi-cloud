@@ -15,10 +15,18 @@ export const hostedCredentialReferenceSchema = z
 
 export const hostedCredentialReferencesSchema = z.array(hostedCredentialReferenceSchema).max(100).superRefine((references, context) => {
   const names = new Set<string>();
+  const referencesSeen = new Set<string>();
   const environmentVariables = new Set<string>();
   for (const [index, reference] of references.entries()) {
     if (names.has(reference.name)) {
       context.addIssue({ code: "custom", message: "credential reference names must be unique", path: [index, "name"] });
+    }
+    if (referencesSeen.has(reference.reference)) {
+      context.addIssue({
+        code: "custom",
+        message: "credential references must be unique",
+        path: [index, "reference"],
+      });
     }
     if (environmentVariables.has(reference.environmentVariable)) {
       context.addIssue({
@@ -28,6 +36,7 @@ export const hostedCredentialReferencesSchema = z.array(hostedCredentialReferenc
       });
     }
     names.add(reference.name);
+    referencesSeen.add(reference.reference);
     environmentVariables.add(reference.environmentVariable);
   }
 });

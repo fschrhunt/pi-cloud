@@ -39,6 +39,12 @@
 - Place focused tests beside protected behavior as `src/**/*.test.ts`.
 - Comment exported functions, classes, and modules with their purpose and contract.
 
+## Git
+
+- Format commits and pull-request titles as `{feat,fix,docs,refactor,test,chore}[(api,runner,contracts)]: <concise summary>`.
+- Use the package scope when one workspace owns the change.
+- Omit the scope for repository-wide changes.
+
 ## Validation
 
 ```bash

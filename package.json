@@ -2,10 +2,9 @@
   "name": "pi-cloud",
   "version": "0.1.0",
   "private": true,
-  "description": "An open-source, self-hosted, always-on home for Pi.",
+  "description": "A self-hosted remote runtime for Pi.",
   "workspaces": [
-    "packages/*",
-    "apps/*"
+    "packages/*"
   ],
   "packageManager": "npm@11.8.0",
   "engines": {

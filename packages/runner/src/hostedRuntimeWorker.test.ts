@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { HostedRuntimeLaunch } from "@pi-cloud/contracts";
 import WebSocket from "ws";
-import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker } from "./hostedRuntimeWorker.js";
+import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker, validateNativeSessionRecord } from "./hostedRuntimeWorker.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 
@@ -74,6 +74,17 @@ test("hosted worker checks out an absent repository and requests native state on
     },
     projectTrust: "untrusted",
   };
+  const outsideSessionFile = join(root, "outside-session.jsonl");
+  await fs.writeFile(outsideSessionFile, "outside");
+  await fs.symlink(outsideSessionFile, join(sessionDirectory, "linked-session.jsonl"));
+  assert.throws(() => validateNativeSessionRecord(launch, {
+    id: "pi-cloud-internal-startup-state",
+    type: "response",
+    command: "get_state",
+    success: true,
+    data: { sessionId: "native-1", sessionFile: join(sessionDirectory, "linked-session.jsonl") },
+  }), /symbolic link/);
+
   const socket = new FakeSocket();
   let checkoutCount = 0;
 

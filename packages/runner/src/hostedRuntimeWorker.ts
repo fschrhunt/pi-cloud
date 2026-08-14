@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
-import { dirname } from "node:path";
+import { promises as fs, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative } from "node:path";
 import { promisify } from "node:util";
 import {
   hostedRuntimeClaimSchema,
@@ -13,7 +13,12 @@ import {
 import { z } from "zod";
 import WebSocket, { type RawData } from "ws";
 import { checkoutExactRevision } from "./checkout.js";
-import { authorizeHostedRuntimeRealPaths, type HostedRuntimeAuthorizedRoots } from "./pathAuthorization.js";
+import {
+  authorizeHostedRuntimeRealPaths,
+  nativeSessionDirectory,
+  runtimeHomeDirectory,
+  type HostedRuntimeAuthorizedRoots,
+} from "./pathAuthorization.js";
 import { PiRpcSupervisor } from "./piRpcSupervisor.js";
 import { prepareIsolatedWorkspace, type RuntimeProcessIdentity } from "./workspaceIdentity.js";
 
@@ -82,10 +87,9 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   let processIdentity: RuntimeProcessIdentity | undefined;
   try {
     await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
-    await materializeRepository(launch, options.checkout ?? checkoutExactRevision);
-    if (options.processIsolation === "workspace_uid") {
-      processIdentity = await prepareIsolatedWorkspace(launch);
-    }
+    if (options.processIsolation === "workspace_uid") processIdentity = await prepareIsolatedWorkspace(launch);
+    await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity);
+    if (processIdentity) await prepareIsolatedWorkspace(launch);
   } catch (error: unknown) {
     scrubResolvedCredentials(credentials);
     throw error;
@@ -115,6 +119,12 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
       processIdentity,
       onRecord: (record) => {
         if (socket.readyState !== WebSocket.OPEN) return;
+        try {
+          validateNativeSessionRecord(launch, record);
+        } catch {
+          socket.close(1008, "native session path rejected");
+          return;
+        }
         const envelope = {
           version: 1 as const,
           hostedSessionId: launch.hostedSessionId,
@@ -217,14 +227,22 @@ export function createAuthenticatedWebSocket(url: string, token: string): WebSoc
 async function materializeRepository(
   launch: HostedRuntimeLaunch,
   checkout: typeof checkoutExactRevision,
+  processIdentity?: RuntimeProcessIdentity,
 ): Promise<void> {
   const gitDirectory = `${launch.workspaceRoot}/.git`;
   try {
     const stats = await fs.stat(gitDirectory);
     if (!stats.isDirectory()) throw new Error("Persistent workspace .git is not a directory");
+    const gitOptions = {
+      shell: false as const,
+      timeout: 30_000,
+      env: isolatedGitEnvironment(launch),
+      ...(processIdentity ?? {}),
+    };
+    const safeGit = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
     const [{ stdout }, { stdout: remoteUrl }] = await Promise.all([
-      execFileAsync("git", ["-C", launch.workspaceRoot, "rev-parse", "HEAD"], { shell: false, timeout: 30_000 }),
-      execFileAsync("git", ["-C", launch.workspaceRoot, "remote", "get-url", "origin"], { shell: false, timeout: 30_000 }),
+      execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "rev-parse", "HEAD"], gitOptions),
+      execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "remote", "get-url", "origin"], gitOptions),
     ]);
     if (stdout.trim().toLowerCase() !== launch.repository.revision) {
       throw new Error("Persistent workspace revision does not match hosted runtime launch");
@@ -247,6 +265,31 @@ async function materializeRepository(
     source: { kind: "https-url", repositoryUrl: launch.repository.repositoryUrl },
     scratchRoot: dirname(launch.workspaceRoot),
   });
+}
+
+function isolatedGitEnvironment(launch: HostedRuntimeLaunch): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH,
+    HOME: runtimeHomeDirectory(launch),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+  };
+}
+
+export function validateNativeSessionRecord(launch: HostedRuntimeLaunch, record: PiRpcRecord): void {
+  const value = record as { id?: unknown; type?: unknown; command?: unknown; success?: unknown; data?: { sessionFile?: unknown } };
+  if (value.id !== "pi-cloud-internal-startup-state") return;
+  if (value.type !== "response" || value.command !== "get_state" || value.success !== true || typeof value.data?.sessionFile !== "string") {
+    throw new Error("Pi returned an invalid startup state response");
+  }
+  const root = realpathSync(nativeSessionDirectory(launch));
+  const sessionFile = realpathSync(value.data.sessionFile);
+  const fromRoot = relative(root, sessionFile);
+  if (fromRoot === "" || fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+    throw new Error("Pi native session file escapes its session directory through a symbolic link");
+  }
 }
 
 function scrubResolvedCredentials(credentials: ResolvedHostedCredentials): void {

@@ -17,13 +17,13 @@ services:
       PI_CLOUD_HOSTED_SESSION_ROOTS: "${PI_CLOUD_HOSTED_SESSION_ROOTS:-/var/lib/pi-cloud/workspaces}"
       PI_CLOUD_HOSTED_AGENT_ROOTS: "${PI_CLOUD_HOSTED_AGENT_ROOTS:-/var/lib/pi-cloud/agent}"
       PI_CLOUD_PI_EXECUTABLE: "${PI_CLOUD_PI_EXECUTABLE:-pi}"
-      HOME: /var/lib/pi-cloud/agent
+      HOME: /tmp/pi-cloud-runner-home
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
     volumes:
       - pi-cloud-workspaces:/var/lib/pi-cloud/workspaces
-      - pi-cloud-agent:/var/lib/pi-cloud/agent
+      - pi-cloud-agent:/var/lib/pi-cloud/agent:ro
     extra_hosts:
       - host.docker.internal:host-gateway
     cap_drop:

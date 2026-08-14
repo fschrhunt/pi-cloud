@@ -183,6 +183,11 @@ const migrations = [
   ) STRICT;
   CREATE UNIQUE INDEX one_active_assignment_per_session ON runtime_assignments(hosted_session_id) WHERE stopped_at IS NULL;
   `,
+  `
+  CREATE UNIQUE INDEX one_active_session_per_workspace
+    ON hosted_sessions(workspace_id)
+    WHERE state IN ('queued','starting','running');
+  `,
 ];
 
 type AgentRow = {
@@ -1040,6 +1045,10 @@ export class ControlPlaneStore {
         .prepare("SELECT entity_id FROM idempotency_keys WHERE owner_id = ? AND scope = ? AND key = ?")
         .get(ownerId, `create-session:${workspaceId}`, idempotencyKey) as { entity_id: string } | undefined;
       if (prior) return this.requireHostedSession(ownerId, prior.entity_id);
+      const active = this.database
+        .prepare("SELECT id FROM hosted_sessions WHERE workspace_id = ? AND state IN ('queued','starting','running') LIMIT 1")
+        .get(workspaceId);
+      if (active) throw conflict("workspace_session_active", "Workspace already has an active hosted session");
 
       const sessionId = randomUUID();
       this.database
@@ -1086,6 +1095,12 @@ export class ControlPlaneStore {
         .prepare("SELECT 1 FROM runtime_assignments WHERE hosted_session_id = ? AND stopped_at IS NULL")
         .get(sessionId);
       if (assignment) throw conflict("session_runtime_active", "Hosted session runtime is still stopping");
+      const active = this.database
+        .prepare(
+          "SELECT id FROM hosted_sessions WHERE workspace_id = ? AND id <> ? AND state IN ('queued','starting','running') LIMIT 1",
+        )
+        .get(session.workspaceId, sessionId);
+      if (active) throw conflict("workspace_session_active", "Workspace already has an active hosted session");
       this.transitionHostedSession(sessionId, session.state, "queued", "start_requested", timestamp);
       return this.requireHostedSession(ownerId, sessionId);
     });
@@ -1129,16 +1144,6 @@ export class ControlPlaneStore {
       if (session.state !== "stopped") throw conflict("session_not_stopped", "Hosted session must be stopped before it is archived");
       this.transitionHostedSession(sessionId, session.state, "archived", "archive_requested", timestamp, { archivedAt: timestamp });
       return this.requireHostedSession(ownerId, sessionId);
-    });
-  }
-
-  deleteHostedSession(ownerId: string, sessionId: string): void {
-    this.transaction(() => {
-      const session = this.requireHostedSession(ownerId, sessionId);
-      if (session.state !== "stopped" && session.state !== "archived") {
-        throw conflict("session_not_stopped", "Hosted session must be stopped or archived before deletion");
-      }
-      this.database.prepare("DELETE FROM hosted_sessions WHERE id = ? AND owner_id = ?").run(sessionId, ownerId);
     });
   }
 

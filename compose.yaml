@@ -1,9 +1,9 @@
-# Local runner smoke test. Production runners require microVM isolation and egress policy.
+# Local-development and single-operator runner smoke test.
 services:
   runner:
     build:
       context: .
-      dockerfile: apps/runner/Dockerfile
+      dockerfile: packages/runner/Dockerfile
     environment:
       PI_CLOUD_CONTROL_PLANE_URL: ${PI_CLOUD_CONTROL_PLANE_URL:-https://control-plane.invalid}
       PI_CLOUD_TASK_LEASE: ${PI_CLOUD_TASK_LEASE:?Set a signed short-lived development lease before running}

@@ -31,8 +31,12 @@ function config(overrides: Partial<ApiConfig> = {}): ApiConfig {
     },
     hostedCredentialReferences: [
       { name: "provider", reference: "vault://provider/key", environmentVariable: "ANTHROPIC_API_KEY" },
+      { name: "unused", reference: "vault://unused/key", environmentVariable: "OPENAI_API_KEY" },
     ],
-    hostedCredentialValues: { "vault://provider/key": "scoped-provider-secret" },
+    hostedCredentialValues: {
+      "vault://provider/key": "scoped-provider-secret",
+      "vault://unused/key": "ungranted-provider-secret",
+    },
     ...overrides,
   };
 }
@@ -120,6 +124,7 @@ test("claiming a hosted runtime is atomic, mints a validated launch, and derives
   assert.equal(claimed.launch.projectTrust, "trusted");
   assert.deepEqual(claimed.credentials, [{ reference: "vault://provider/key", value: "scoped-provider-secret" }]);
   assert.equal(JSON.stringify(workspace).includes("scoped-provider-secret"), false);
+  assert.equal(JSON.stringify(claimed).includes("ungranted-provider-secret"), false);
   assert.equal(claimed.tunnel.url, `wss://pi-cloud.example.com/internal/v1/hosted-sessions/${session.id}/tunnel`);
 
   const second = controlPlane.claimHostedRuntime({ runnerId: "runner-2" });

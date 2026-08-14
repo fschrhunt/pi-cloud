@@ -1,4 +1,11 @@
-import { checkoutProvenanceSchema, immutableRevisionSchema, repositoryUrlSchema, type CheckoutProvenance } from "@pi-cloud/contracts";
+import {
+  checkoutProvenanceSchema,
+  hostedCredentialReferenceSchema,
+  immutableRevisionSchema,
+  repositoryUrlSchema,
+  type CheckoutProvenance,
+  type HostedCredentialReference,
+} from "@pi-cloud/contracts";
 import { z } from "zod";
 
 export const revisionSchema = immutableRevisionSchema;
@@ -178,3 +185,52 @@ export type RunEvent = {
 };
 
 export { checkoutProvenanceSchema };
+
+export const hostedSessionStateSchema = z.enum(["queued", "starting", "running", "stopped", "archived"]);
+export type HostedSessionState = z.infer<typeof hostedSessionStateSchema>;
+
+export const createWorkspaceSchema = z
+  .object({
+    repositoryUrl: repositoryUrlSchema,
+    revision: revisionSchema,
+    projectTrust: z.enum(["trusted", "untrusted"]).default("untrusted"),
+    credentialReferenceNames: z
+      .array(z.string().min(1).max(200))
+      .max(100)
+      .refine((names) => new Set(names).size === names.length, "credential reference names must be unique")
+      .default([]),
+  })
+  .strict();
+export type CreateWorkspace = z.infer<typeof createWorkspaceSchema>;
+
+export const createHostedSessionSchema = z.object({}).strict().default({});
+
+export type Workspace = {
+  id: string;
+  ownerId: string;
+  repositoryUrl: string;
+  revision: string;
+  root: string;
+  projectTrust: "trusted" | "untrusted";
+  agentDirectory: string;
+  credentialReferences: HostedCredentialReference[];
+  status: "active";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HostedSession = {
+  id: string;
+  workspaceId: string;
+  ownerId: string;
+  state: HostedSessionState;
+  nativeSessionId: string | null;
+  nativeSessionFile: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  stoppedAt: string | null;
+  archivedAt: string | null;
+};
+
+export { hostedCredentialReferenceSchema };

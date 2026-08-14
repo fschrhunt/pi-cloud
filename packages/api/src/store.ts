@@ -2,20 +2,25 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementResultingChanges } from "node:sqlite";
-import type { CheckoutProvenance } from "@pi-cloud/contracts";
+import type { CheckoutProvenance, HostedCredentialReference } from "@pi-cloud/contracts";
 import {
+  hostedSessionStateSchema,
   runBudgetsSchema,
   runStatusSchema,
   terminalRunStatuses,
   type Agent,
   type ConsumedBudget,
   type CreateAgent,
+  type CreateWorkspace,
+  type HostedSession,
+  type HostedSessionState,
   type IngestRunEvent,
   type Principal,
   type Run,
   type RunBudgets,
   type RunEvent,
   type RunStatus,
+  type Workspace,
 } from "./domain.js";
 import { conflict, forbidden, notFound } from "./errors.js";
 
@@ -134,6 +139,50 @@ const migrations = [
     recorded_at TEXT NOT NULL
   ) STRICT;
   `,
+  `
+  CREATE TABLE workspaces (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    repository_url TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    root TEXT NOT NULL UNIQUE,
+    project_trust TEXT NOT NULL CHECK (project_trust IN ('trusted','untrusted')),
+    agent_directory TEXT NOT NULL,
+    credential_references_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX workspaces_owner ON workspaces(owner_id, created_at, id);
+
+  CREATE TABLE hosted_sessions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    owner_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('queued','starting','running','stopped','archived')),
+    native_session_id TEXT,
+    native_session_file TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    stopped_at TEXT,
+    archived_at TEXT
+  ) STRICT;
+  CREATE INDEX hosted_sessions_owner ON hosted_sessions(owner_id, created_at, id);
+  CREATE INDEX hosted_sessions_queue ON hosted_sessions(state, created_at);
+
+  CREATE TABLE runtime_assignments (
+    id TEXT PRIMARY KEY,
+    hosted_session_id TEXT NOT NULL REFERENCES hosted_sessions(id) ON DELETE CASCADE,
+    runner_id TEXT NOT NULL,
+    token_digest TEXT NOT NULL UNIQUE,
+    started_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    stopped_at TEXT,
+    last_heartbeat_at TEXT
+  ) STRICT;
+  CREATE UNIQUE INDEX one_active_assignment_per_session ON runtime_assignments(hosted_session_id) WHERE stopped_at IS NULL;
+  `,
 ];
 
 type AgentRow = {
@@ -196,6 +245,53 @@ type CheckoutProvenanceRow = {
   hooks_disabled: 1;
   started_at: string;
   completed_at: string;
+};
+
+type WorkspaceRow = {
+  id: string;
+  owner_id: string;
+  repository_url: string;
+  revision: string;
+  root: string;
+  project_trust: "trusted" | "untrusted";
+  agent_directory: string;
+  credential_references_json: string;
+  status: "active";
+  created_at: string;
+  updated_at: string;
+};
+
+type HostedSessionRow = {
+  id: string;
+  workspace_id: string;
+  owner_id: string;
+  state: HostedSessionState;
+  native_session_id: string | null;
+  native_session_file: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  stopped_at: string | null;
+  archived_at: string | null;
+};
+
+type RuntimeAssignmentRow = {
+  id: string;
+  hosted_session_id: string;
+  runner_id: string;
+  token_digest: string;
+  started_at: string;
+  expires_at: string;
+  stopped_at: string | null;
+  last_heartbeat_at: string | null;
+};
+
+const legalHostedSessionTransitions: Record<HostedSessionState, ReadonlySet<HostedSessionState>> = {
+  queued: new Set(["starting", "stopped"]),
+  starting: new Set(["running", "stopped"]),
+  running: new Set(["stopped"]),
+  stopped: new Set(["queued", "archived"]),
+  archived: new Set([]),
 };
 
 /** SQLite-backed control-plane metadata store with synchronous transactional state changes. */
@@ -864,6 +960,336 @@ export class ControlPlaneStore {
       .all(runId, run.taskId) as unknown as Array<Record<string, unknown>>;
   }
 
+  createWorkspace(
+    ownerId: string,
+    input: CreateWorkspace,
+    root: string,
+    agentDirectory: string,
+    credentialReferences: HostedCredentialReference[],
+    idempotencyKey: string,
+    now: Date,
+    workspaceId: string,
+  ): Workspace {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const prior = this.database
+        .prepare("SELECT entity_id FROM idempotency_keys WHERE owner_id = ? AND scope = 'create-workspace' AND key = ?")
+        .get(ownerId, idempotencyKey) as { entity_id: string } | undefined;
+      if (prior) return this.requireWorkspace(ownerId, prior.entity_id);
+
+      this.database
+        .prepare(
+          `INSERT INTO workspaces
+           (id, owner_id, repository_url, revision, root, project_trust, agent_directory, credential_references_json, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+        )
+        .run(
+          workspaceId,
+          ownerId,
+          input.repositoryUrl,
+          input.revision,
+          root,
+          input.projectTrust,
+          agentDirectory,
+          JSON.stringify(credentialReferences),
+          timestamp,
+          timestamp,
+        );
+      this.database
+        .prepare("INSERT INTO idempotency_keys (owner_id, scope, key, entity_id, created_at) VALUES (?, 'create-workspace', ?, ?, ?)")
+        .run(ownerId, idempotencyKey, workspaceId, timestamp);
+      return this.requireWorkspace(ownerId, workspaceId);
+    });
+  }
+
+  getWorkspace(ownerId: string, workspaceId: string): Workspace | undefined {
+    const row = this.database.prepare("SELECT * FROM workspaces WHERE id = ? AND owner_id = ?").get(workspaceId, ownerId) as
+      | WorkspaceRow
+      | undefined;
+    return row ? mapWorkspace(row) : undefined;
+  }
+
+  requireWorkspace(ownerId: string, workspaceId: string): Workspace {
+    const workspace = this.getWorkspace(ownerId, workspaceId);
+    if (!workspace) throw notFound("Workspace");
+    return workspace;
+  }
+
+  listWorkspaces(ownerId: string, limit: number, afterCreatedAt?: string, afterId?: string): { items: Workspace[]; nextCursor: string | null } {
+    const rows = (afterCreatedAt && afterId
+      ? this.database
+          .prepare(
+            `SELECT * FROM workspaces WHERE owner_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+             ORDER BY created_at DESC, id DESC LIMIT ?`,
+          )
+          .all(ownerId, afterCreatedAt, afterCreatedAt, afterId, limit + 1)
+      : this.database
+          .prepare("SELECT * FROM workspaces WHERE owner_id = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+          .all(ownerId, limit + 1)) as unknown as WorkspaceRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit).map(mapWorkspace);
+    const last = items.at(-1);
+    return { items, nextCursor: hasMore && last ? encodeListCursor(last.createdAt, last.id) : null };
+  }
+
+  createHostedSession(ownerId: string, workspaceId: string, idempotencyKey: string, now: Date): HostedSession {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      this.requireWorkspace(ownerId, workspaceId);
+      const prior = this.database
+        .prepare("SELECT entity_id FROM idempotency_keys WHERE owner_id = ? AND scope = ? AND key = ?")
+        .get(ownerId, `create-session:${workspaceId}`, idempotencyKey) as { entity_id: string } | undefined;
+      if (prior) return this.requireHostedSession(ownerId, prior.entity_id);
+
+      const sessionId = randomUUID();
+      this.database
+        .prepare(
+          `INSERT INTO hosted_sessions (id, workspace_id, owner_id, state, created_at, updated_at)
+           VALUES (?, ?, ?, 'queued', ?, ?)`,
+        )
+        .run(sessionId, workspaceId, ownerId, timestamp, timestamp);
+      this.database
+        .prepare("INSERT INTO idempotency_keys (owner_id, scope, key, entity_id, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(ownerId, `create-session:${workspaceId}`, idempotencyKey, sessionId, timestamp);
+      return this.requireHostedSession(ownerId, sessionId);
+    });
+  }
+
+  getHostedSession(ownerId: string, sessionId: string): HostedSession | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM hosted_sessions WHERE id = ? AND owner_id = ?")
+      .get(sessionId, ownerId) as HostedSessionRow | undefined;
+    return row ? mapHostedSession(row) : undefined;
+  }
+
+  requireHostedSession(ownerId: string, sessionId: string): HostedSession {
+    const session = this.getHostedSession(ownerId, sessionId);
+    if (!session) throw notFound("Hosted session");
+    return session;
+  }
+
+  listHostedSessionsForWorkspace(ownerId: string, workspaceId: string): HostedSession[] {
+    this.requireWorkspace(ownerId, workspaceId);
+    const rows = this.database
+      .prepare("SELECT * FROM hosted_sessions WHERE workspace_id = ? ORDER BY created_at ASC")
+      .all(workspaceId) as unknown as HostedSessionRow[];
+    return rows.map(mapHostedSession);
+  }
+
+  /** Restarts a fully disconnected stopped session; active runtime teardown must complete first. */
+  startHostedSession(ownerId: string, sessionId: string, now: Date): HostedSession {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const session = this.requireHostedSession(ownerId, sessionId);
+      if (session.state === "queued" || session.state === "starting" || session.state === "running") return session;
+      const assignment = this.database
+        .prepare("SELECT 1 FROM runtime_assignments WHERE hosted_session_id = ? AND stopped_at IS NULL")
+        .get(sessionId);
+      if (assignment) throw conflict("session_runtime_active", "Hosted session runtime is still stopping");
+      this.transitionHostedSession(sessionId, session.state, "queued", "start_requested", timestamp);
+      return this.requireHostedSession(ownerId, sessionId);
+    });
+  }
+
+  /** Idempotently marks a session stopped; used by an explicit stop request and by runtime disconnects alike. */
+  stopHostedSession(ownerId: string, sessionId: string, now: Date): HostedSession {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const session = this.requireHostedSession(ownerId, sessionId);
+      if (session.state === "stopped" || session.state === "archived") return session;
+      this.transitionHostedSession(sessionId, session.state, "stopped", "stop_requested", timestamp, { stoppedAt: timestamp });
+      this.database
+        .prepare("UPDATE runtime_assignments SET stopped_at = ? WHERE hosted_session_id = ? AND stopped_at IS NULL")
+        .run(timestamp, sessionId);
+      return this.requireHostedSession(ownerId, sessionId);
+    });
+  }
+
+  /** Same idempotent transition as {@link stopHostedSession} without an owner check, for runtime-driven disconnects. */
+  markHostedSessionStoppedByRuntime(sessionId: string, now: Date): void {
+    const timestamp = now.toISOString();
+    this.transaction(() => {
+      const row = this.database.prepare("SELECT * FROM hosted_sessions WHERE id = ?").get(sessionId) as HostedSessionRow | undefined;
+      if (!row) return;
+      const session = mapHostedSession(row);
+      if (session.state !== "stopped" && session.state !== "archived") {
+        this.transitionHostedSession(sessionId, session.state, "stopped", "runtime_disconnected", timestamp, { stoppedAt: timestamp });
+      }
+      this.database
+        .prepare("UPDATE runtime_assignments SET stopped_at = ? WHERE hosted_session_id = ? AND stopped_at IS NULL")
+        .run(timestamp, sessionId);
+    });
+  }
+
+  archiveHostedSession(ownerId: string, sessionId: string, now: Date): HostedSession {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const session = this.requireHostedSession(ownerId, sessionId);
+      if (session.state === "archived") return session;
+      if (session.state !== "stopped") throw conflict("session_not_stopped", "Hosted session must be stopped before it is archived");
+      this.transitionHostedSession(sessionId, session.state, "archived", "archive_requested", timestamp, { archivedAt: timestamp });
+      return this.requireHostedSession(ownerId, sessionId);
+    });
+  }
+
+  deleteHostedSession(ownerId: string, sessionId: string): void {
+    this.transaction(() => {
+      const session = this.requireHostedSession(ownerId, sessionId);
+      if (session.state !== "stopped" && session.state !== "archived") {
+        throw conflict("session_not_stopped", "Hosted session must be stopped or archived before deletion");
+      }
+      this.database.prepare("DELETE FROM hosted_sessions WHERE id = ? AND owner_id = ?").run(sessionId, ownerId);
+    });
+  }
+
+  /** Stops sessions whose ephemeral sockets were lost when this single API process restarted. */
+  recoverHostedSessionsAfterControlPlaneRestart(now: Date): number {
+    const timestamp = now.toISOString();
+    return this.transaction(() => {
+      const sessions = this.database
+        .prepare("SELECT id FROM hosted_sessions WHERE state IN ('starting','running')")
+        .all() as unknown as Array<{ id: string }>;
+      for (const session of sessions) {
+        this.database
+          .prepare("UPDATE runtime_assignments SET stopped_at = ? WHERE hosted_session_id = ? AND stopped_at IS NULL")
+          .run(timestamp, session.id);
+        this.database
+          .prepare("UPDATE hosted_sessions SET state = 'stopped', updated_at = ?, stopped_at = ? WHERE id = ?")
+          .run(timestamp, timestamp, session.id);
+      }
+      return sessions.length;
+    });
+  }
+
+  /** Atomically claims the oldest queued session for one runner and mints its scoped assignment token digest. */
+  claimHostedRuntime(
+    runnerId: string,
+    assignmentId: string,
+    tokenDigestValue: string,
+    now: Date,
+    assignmentTtlSeconds = 60,
+  ): { session: HostedSession; workspace: Workspace } | undefined {
+    const timestamp = now.toISOString();
+    const expiresAt = new Date(now.getTime() + assignmentTtlSeconds * 1_000).toISOString();
+    return this.transaction(() => {
+      const expired = this.database
+        .prepare(
+          `SELECT runtime_assignments.id, runtime_assignments.hosted_session_id
+           FROM runtime_assignments
+           JOIN hosted_sessions ON hosted_sessions.id = runtime_assignments.hosted_session_id
+           WHERE runtime_assignments.stopped_at IS NULL
+             AND runtime_assignments.expires_at <= ?
+             AND hosted_sessions.state = 'starting'`,
+        )
+        .all(timestamp) as unknown as Array<{ id: string; hosted_session_id: string }>;
+      for (const assignment of expired) {
+        this.database.prepare("UPDATE runtime_assignments SET stopped_at = ? WHERE id = ?").run(timestamp, assignment.id);
+        this.database
+          .prepare("UPDATE hosted_sessions SET state = 'stopped', stopped_at = ?, updated_at = ? WHERE id = ? AND state = 'starting'")
+          .run(timestamp, timestamp, assignment.hosted_session_id);
+      }
+      const row = this.database
+        .prepare("SELECT * FROM hosted_sessions WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1")
+        .get() as HostedSessionRow | undefined;
+      if (!row) return undefined;
+
+      assertChanged(
+        this.database
+          .prepare("UPDATE hosted_sessions SET state = 'starting', updated_at = ? WHERE id = ? AND state = 'queued'")
+          .run(timestamp, row.id),
+        "Hosted session was claimed concurrently",
+      );
+      this.database
+        .prepare(
+          "INSERT INTO runtime_assignments (id, hosted_session_id, runner_id, token_digest, started_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(assignmentId, row.id, runnerId, tokenDigestValue, timestamp, expiresAt);
+
+      const session = this.requireHostedSessionInternal(row.id);
+      const workspace = this.requireWorkspaceInternal(session.workspaceId);
+      return { session, workspace };
+    });
+  }
+
+  /** Resolves the single active assignment authorized to open a hosted session's internal tunnel. */
+  authorizeRuntimeAssignment(sessionId: string, tokenDigestValue: string, now: Date): { assignmentId: string; session: HostedSession; workspace: Workspace } | undefined {
+    const row = this.database
+      .prepare(
+        "SELECT * FROM runtime_assignments WHERE hosted_session_id = ? AND token_digest = ? AND stopped_at IS NULL AND expires_at > ?",
+      )
+      .get(sessionId, tokenDigestValue, now.toISOString()) as RuntimeAssignmentRow | undefined;
+    if (!row) return undefined;
+    const session = this.requireHostedSessionInternal(sessionId);
+    if (session.state !== "starting") return undefined;
+    const workspace = this.requireWorkspaceInternal(session.workspaceId);
+    return { assignmentId: row.id, session, workspace };
+  }
+
+  markHostedSessionRunning(sessionId: string, now: Date): void {
+    const timestamp = now.toISOString();
+    this.transaction(() => {
+      const session = this.requireHostedSessionInternal(sessionId);
+      if (session.state !== "starting") return;
+      this.transitionHostedSession(sessionId, "starting", "running", "runtime_connected", timestamp, { startedAt: timestamp });
+    });
+  }
+
+  /** Persists opaque native Pi session metadata reported once at runtime startup. */
+  recordNativeSessionMetadata(sessionId: string, nativeSessionId: string, nativeSessionFile: string, now: Date): boolean {
+    const timestamp = now.toISOString();
+    const result = this.database
+      .prepare(
+        `UPDATE hosted_sessions
+         SET native_session_id = ?, native_session_file = ?, updated_at = ?
+         WHERE id = ?
+           AND (native_session_id IS NULL OR native_session_id = ?)
+           AND (native_session_file IS NULL OR native_session_file = ?)`,
+      )
+      .run(nativeSessionId, nativeSessionFile, timestamp, sessionId, nativeSessionId, nativeSessionFile);
+    return result.changes === 1;
+  }
+
+  touchAssignmentHeartbeat(assignmentId: string, now: Date): void {
+    this.database
+      .prepare("UPDATE runtime_assignments SET last_heartbeat_at = ? WHERE id = ? AND stopped_at IS NULL")
+      .run(now.toISOString(), assignmentId);
+  }
+
+  private requireHostedSessionInternal(sessionId: string): HostedSession {
+    const row = this.database.prepare("SELECT * FROM hosted_sessions WHERE id = ?").get(sessionId) as HostedSessionRow | undefined;
+    if (!row) throw notFound("Hosted session");
+    return mapHostedSession(row);
+  }
+
+  private requireWorkspaceInternal(workspaceId: string): Workspace {
+    const row = this.database.prepare("SELECT * FROM workspaces WHERE id = ?").get(workspaceId) as WorkspaceRow | undefined;
+    if (!row) throw notFound("Workspace");
+    return mapWorkspace(row);
+  }
+
+  private transitionHostedSession(
+    sessionId: string,
+    from: HostedSessionState,
+    to: HostedSessionState,
+    reason: string,
+    timestamp: string,
+    fields: { startedAt?: string; stoppedAt?: string; archivedAt?: string } = {},
+  ): void {
+    if (!legalHostedSessionTransitions[from].has(to)) {
+      throw conflict("invalid_transition", `Cannot transition hosted session from ${from} to ${to}`);
+    }
+    assertChanged(
+      this.database
+        .prepare(
+          `UPDATE hosted_sessions SET state = ?, updated_at = ?,
+           started_at = COALESCE(?, started_at), stopped_at = COALESCE(?, stopped_at), archived_at = COALESCE(?, archived_at)
+           WHERE id = ? AND state = ?`,
+        )
+        .run(to, timestamp, fields.startedAt ?? null, fields.stoppedAt ?? null, fields.archivedAt ?? null, sessionId, from),
+      `Hosted session transition (${reason}) was stale`,
+    );
+  }
+
   private migrate(): void {
     this.database.exec(
       "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL) STRICT;",
@@ -1074,6 +1500,38 @@ function mapCheckoutProvenance(row: CheckoutProvenanceRow): CheckoutProvenance {
     hooksDisabled: true,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+  };
+}
+
+function mapWorkspace(row: WorkspaceRow): Workspace {
+  return {
+    id: row.id,
+    ownerId: row.owner_id,
+    repositoryUrl: row.repository_url,
+    revision: row.revision,
+    root: row.root,
+    projectTrust: row.project_trust,
+    agentDirectory: row.agent_directory,
+    credentialReferences: JSON.parse(row.credential_references_json) as HostedCredentialReference[],
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapHostedSession(row: HostedSessionRow): HostedSession {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    ownerId: row.owner_id,
+    state: hostedSessionStateSchema.parse(row.state),
+    nativeSessionId: row.native_session_id,
+    nativeSessionFile: row.native_session_file,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    startedAt: row.started_at,
+    stoppedAt: row.stopped_at,
+    archivedAt: row.archived_at,
   };
 }
 

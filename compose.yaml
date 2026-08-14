@@ -1,26 +1,41 @@
-# Local-development and single-operator runner smoke test.
+# Local single-operator hosted runtime worker.
+#
+# This is a development baseline, not a multi-tenant isolation boundary. The container keeps a
+# persistent workspace volume and shared Pi agent volume, connects back to a local API, and needs
+# outbound network access for Git fetches and model providers.
 services:
-  runner:
+  hosted-runner:
     build:
       context: .
       dockerfile: packages/runner/Dockerfile
+    restart: unless-stopped
     environment:
-      PI_CLOUD_CONTROL_PLANE_URL: ${PI_CLOUD_CONTROL_PLANE_URL:-https://control-plane.invalid}
-      PI_CLOUD_TASK_LEASE: ${PI_CLOUD_TASK_LEASE:?Set a signed short-lived development lease before running}
-      PI_CLOUD_TASK_LEASE_PUBLIC_KEY: ${PI_CLOUD_TASK_LEASE_PUBLIC_KEY:?Set the Ed25519 lease verification key}
-      PI_CLOUD_TASK_LEASE_ISSUER: ${PI_CLOUD_TASK_LEASE_ISSUER:-pi-cloud-control-plane}
-      PI_CLOUD_RUNNER_AUDIENCE: ${PI_CLOUD_RUNNER_AUDIENCE:-runner-pool/local}
-      PI_CLOUD_RUNNER_ID: ${PI_CLOUD_RUNNER_ID:-runner-local-1}
-      PI_CLOUD_WORKSPACE_ROOT: /workspace
+      PI_CLOUD_HOSTED_DISPATCHER_URL: "${PI_CLOUD_HOSTED_DISPATCHER_URL:-http://host.docker.internal:3000}"
+      PI_CLOUD_HOSTED_DISPATCHER_TOKEN: "${PI_CLOUD_HOSTED_DISPATCHER_TOKEN:-replace-with-at-least-32-random-characters}"
+      PI_CLOUD_RUNNER_ID: "${PI_CLOUD_RUNNER_ID:-hosted-runner-local-1}"
+      PI_CLOUD_HOSTED_WORKSPACE_ROOTS: "${PI_CLOUD_HOSTED_WORKSPACE_ROOTS:-/var/lib/pi-cloud/workspaces}"
+      PI_CLOUD_HOSTED_SESSION_ROOTS: "${PI_CLOUD_HOSTED_SESSION_ROOTS:-/var/lib/pi-cloud/workspaces}"
+      PI_CLOUD_HOSTED_AGENT_ROOTS: "${PI_CLOUD_HOSTED_AGENT_ROOTS:-/var/lib/pi-cloud/agent}"
+      PI_CLOUD_HOSTED_CREDENTIALS: "${PI_CLOUD_HOSTED_CREDENTIALS:-{}}"
+      PI_CLOUD_PI_EXECUTABLE: "${PI_CLOUD_PI_EXECUTABLE:-pi}"
+      HOME: /var/lib/pi-cloud/agent
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m
-      - /workspace:rw,noexec,nosuid,size=256m
+      - /tmp:rw,noexec,nosuid,size=256m
+    volumes:
+      - pi-cloud-workspaces:/var/lib/pi-cloud/workspaces
+      - pi-cloud-agent:/var/lib/pi-cloud/agent
+    extra_hosts:
+      - host.docker.internal:host-gateway
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    pids_limit: 128
-    mem_limit: 512m
-    cpus: 1
-    network_mode: none
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2
+    stop_grace_period: 20s
+
+volumes:
+  pi-cloud-workspaces:
+  pi-cloud-agent:

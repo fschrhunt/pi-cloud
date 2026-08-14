@@ -188,12 +188,6 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
     return hostedControlPlane.archiveHostedSession(principal(request.headers.authorization), required(sessionId));
   });
 
-  app.delete("/v1/hosted-sessions/:sessionId", async (request, reply) => {
-    const { sessionId } = idParamsSchema.parse(request.params);
-    hostedControlPlane.deleteHostedSession(principal(request.headers.authorization), required(sessionId));
-    return reply.code(204).send();
-  });
-
   app.get(
     "/v1/hosted-sessions/:sessionId/rpc",
     {

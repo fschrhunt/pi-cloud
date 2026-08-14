@@ -36,6 +36,7 @@ function config(databasePath = ":memory:"): ApiConfig {
       maxCumulativeBytes: 10_000_000,
     },
     hostedCredentialReferences: [],
+    hostedCredentialValues: {},
   };
 }
 

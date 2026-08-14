@@ -30,6 +30,7 @@ const config: ApiConfig = {
     maxCumulativeBytes: 10_000_000,
   },
   hostedCredentialReferences: [],
+  hostedCredentialValues: {},
 };
 const principal: Principal = { id: "user-1", type: "user", displayName: "Test User" };
 const revision = "0123456789abcdef0123456789abcdef01234567";

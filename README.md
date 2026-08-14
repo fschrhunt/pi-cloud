@@ -2,129 +2,140 @@
   <img src="./assets/logo.svg" width="220" alt="Pi Cloud logo">
 </p>
 
-> An open-source, self-hosted, always-on home for Pi.
+> A self-hosted remote runtime for Pi.
 
 # Pi Cloud
 
-Run Pi on your own always-on server, connect from a browser or API, and keep durable coding sessions close to your repositories and infrastructure.
+Run an unmodified Pi session on an always-available server, then attach from a browser, CLI, or local Pi extension on any device.
 
 > [!WARNING]
-> Pi Cloud is **pre-alpha**. The repository contains an early control-plane slice, not a ready-to-deploy self-hosted server. Do not use it with untrusted repositories or real credentials yet.
+> Pi Cloud is **pre-alpha**. Use local fixtures and development credentials while the remote runtime and production isolation are under construction.
 
-Pi Cloud is not a hosted coding-agent service, a browser clone of [Pi](https://pi.dev), or an IDE. **Pi is the agent runtime inside Pi Cloud.** Pi Cloud provides durable remote access, repository workspaces, scheduling, and web/API surfaces around Pi on infrastructure the operator controls.
+**Pi remains the agent.** Pi Cloud provides authentication, remote transport, workspace and process lifecycle, isolation, and scoped credentials around normal `pi --mode rpc`.
 
-## Why Pi Cloud
+Read [`docs/product-scope.md`](docs/product-scope.md) for the canonical product contract and [`docs/architecture.md`](docs/architecture.md) for implementation boundaries.
 
-| Principle | What it means |
+## Principles
+
+| Principle | Meaning |
 | --- | --- |
-| **Open source** | Keep the complete server, web client, and Pi integration available to inspect, modify, and run without a proprietary control plane. |
-| **Self-hosted first** | Make one always-on Linux server and Docker Compose the primary production shape, not a fallback for a hosted service. |
-| **Pi-native** | Embed Pi through its supported SDK and preserve its session, model, tool, and event behavior instead of recreating an agent. |
-| **Extensible by design** | Load Pi extensions, skills, prompt templates, themes, providers, and packages with their normal global and project scopes. |
-| **Operator-controlled** | Keep repositories, credentials, retention, network policy, and optional sandboxing under the server operator's control. |
-| **Human-steered** | Stream agent events, support follow-ups and cancellation, and make consequential actions reviewable. |
+| **Unmodified Pi** | Run the installed Pi CLI through its RPC/JSONL contract. |
+| **Pi owns the session** | Pi remains authoritative for conversations, tools, compaction, models, and native session persistence. |
+| **Available from any device** | Authenticated clients can attach, prompt, steer, cancel, disconnect, and reconnect. |
+| **Persistent workspace, disposable process** | Repository and native Pi session data survive while idle Pi processes may stop and restart. |
+| **Pi-native customization** | Use normal extensions, skills, prompts, providers, settings, and packages. |
+| **Host-enforced security** | The host enforces authentication, isolation, credential scope, network policy, and resource limits. |
+| **Self-hosted first** | The first supported deployment is one operator-owned Linux server. |
 
-## Architecture
+## Target architecture
 
 ```text
-browser / API / automation
-          │
-          ▼
- Pi Cloud server (apps/api) ─── users, repositories, durable session index
-          │
-          ▼
- local Pi host (apps/runner) ─── @earendil-works/pi-coding-agent SDK
-          │                      ├── persistent repository workspaces
-          │                      ├── Pi sessions and resource discovery
-          │                      └── extensions, skills, prompts, themes, packages
-          ▼
- live events, review, scheduling, Git delivery ─── client
+browser / CLI / local Pi extension
+                 │
+      authenticated HTTP + stream
+                 ▼
+        Pi Cloud API and router
+                 │
+        scoped runtime authority
+                 ▼
+        isolated runtime worker
+          ├── persistent repository workspace
+          ├── opaque native Pi sessions
+          ├── operator Pi configuration
+          ├── scoped credentials
+          └── pi --mode rpc
 ```
 
-A standard installation runs both services on one operator-owned server. The API does not execute repository code; the local Pi host does. Operators may place the Pi host in a container, VM, or another sandbox, but Pi Cloud does not require a proprietary runner service or multi-tenant infrastructure.
+The runtime worker exclusively owns repository workspaces, Pi execution, and repository tools. The API authenticates and routes clients.
 
-Read [`docs/architecture.md`](docs/architecture.md) for component responsibilities, trust boundaries, and deliberate non-goals.
+## Target experience
+
+```text
+install Pi Cloud on a server
+→ open an approved repository workspace
+→ start a hosted Pi session
+→ connect from another device
+→ prompt, steer, follow up, cancel, and reconnect
+→ customize it with normal Pi resources
+```
+
+Logical session availability continues while Pi Cloud stops idle processes and later resumes the same native Pi session in its persistent workspace.
+
+## Pi-native cloud customization
+
+Pi Cloud ships one small trusted Pi package for hosted capabilities beyond the RPC protocol. It uses Pi's public extension API and a narrow per-session capability channel.
+
+Users customize hosted Pi through the same mechanisms as local Pi:
+
+- global and project extensions;
+- skills and prompt templates;
+- settings and providers;
+- Pi packages;
+- project trust.
+
+An operator-authorized administrative session updates persistent instance Pi configuration. Repository sessions receive the instance resources and capabilities selected by the operator.
 
 ## What works today
 
-- Authenticated, SQLite-backed durable agents, finite runs, tasks, and lifecycle history
-- Cursor-paginated lifecycle API with idempotent create, follow-up, cancellation, archive, and delete contracts
-- Atomic runner dispatch and single-use, task-bound Ed25519 lease redemption
-- Persisted run budgets, heartbeats, bounded retry/recovery, terminal reasons, and checkout provenance
-- Append-only allowlisted events with opaque-cursor SSE reconnect
-- Pi host boot configuration, hardened exact checkout, and durable provenance reporting
-- Restrictive local Docker execution baseline with a bounded writable workspace
-- TypeScript workspace checks, builds, and focused restart/concurrency/reconnect/checkout tests
+The implemented pre-alpha foundation includes:
 
-The current slice deliberately stops before Pi process startup. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md).
+- authenticated, SQLite-backed durable agents, runs, tasks, and lifecycle history;
+- atomic dispatch and single-use Ed25519 task leases;
+- budgets, heartbeats, bounded retry/recovery, and terminal reasons;
+- append-only bounded summary events with SSE reconnect;
+- hardened exact-revision checkout and provenance reporting;
+- a restrictive local Docker runner baseline.
 
-## Quick start
+The next vertical slice starts Pi through RPC and attaches an authenticated remote client. See [`docs/control-plane-api.md`](docs/control-plane-api.md) and [`docs/task-leases.md`](docs/task-leases.md) for the implemented foundation.
+
+## Roadmap
+
+1. **Complete:** durable control-plane, secure dispatch, bounded events, and exact checkout foundation.
+2. Start unmodified `pi --mode rpc` in one workspace and remotely prompt, stream, cancel, disconnect, and reconnect to the same native session.
+3. Persist isolated workspaces and operator Pi configuration; add scoped credentials, process cleanup, resource limits, and a documented single-server installation.
+4. Provide a minimal browser client and local Pi extension over the same authenticated API.
+5. Prove native Pi extensions, skills, packages, providers, project trust, and one thin cloud capability extension work end to end.
+
+## Quick start for the current foundation
 
 ### Requirements
 
 - Node.js 22.5+ (`node:sqlite`)
 - npm 11+
 - Docker for the local runner smoke test
-- A Pi-supported model credential once RPC execution is connected
-
-### Run the control plane
 
 ```bash
 npm install
-eval "$(node scripts/create-development-keys.mjs)" # Inspect the script before evaluating.
+
+eval "$(node scripts/create-development-keys.mjs)" # Inspect the script first.
 export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_USER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_API_CREDENTIALS="[{\"token\":\"$PI_CLOUD_USER_TOKEN\",\"subjectId\":\"local-user\",\"type\":\"user\",\"displayName\":\"Local User\"}]"
 npm run dev:api
 ```
 
-In another terminal, check the service:
+In another terminal:
 
 ```bash
 curl http://localhost:3000/health
 ```
 
-```json
-{"status":"ok","service":"pi-cloud-api"}
-```
-
-Create a durable agent and initial run:
-
-```bash
-curl -X POST http://localhost:3000/v1/agents \
-  -H "authorization: Bearer $PI_CLOUD_USER_TOKEN" \
-  -H 'idempotency-key: local-agent-0001' \
-  -H 'content-type: application/json' \
-  -d '{
-    "repositoryUrl": "https://github.com/pi-cloud/example",
-    "revision": "0123456789abcdef0123456789abcdef01234567",
-    "prompt": "Inspect the repository."
-  }'
-```
-
-The default database is `./data/pi-cloud.sqlite`. See the [durable control-plane API](docs/control-plane-api.md) for lifecycle, dispatch, event, and recovery endpoints.
-
-### Pi host container baseline
-
-The Compose service runs as a non-root user with a read-only filesystem, dropped Linux capabilities, resource limits, and a bounded writable workspace mounted at `/workspace`. The current service requires a lease assigned by the running control plane and network access to both that control plane and the authorized HTTPS repository; the checked-in no-network Compose policy must be overridden for that integration. It is a development baseline, not yet the self-hosted Pi runtime.
+The current database defaults to `./data/pi-cloud.sqlite`. Docker supports local development and single-operator packaging; multi-tenant deployments require a stronger isolation boundary.
 
 ## Repository map
 
 ```text
-apps/
-  api/       Fastify control plane, durable lifecycle API, dispatch, and events
-  runner/    Local Pi execution host, configuration, and Docker image
 packages/
-  contracts/ Shared runner/control-plane wire contracts
+  api/       Authentication, metadata, lifecycle, dispatch, and event transport
+  runner/    Isolated repository and Pi runtime worker
+  contracts/ Shared API/runtime wire contracts
 assets/      Project identity assets
-docs/        Architecture and operating decisions
-scripts/     Local development key and lease helpers
+docs/        Product, architecture, and implemented-contract documentation
+scripts/     Local development helpers
 compose.yaml Local runner smoke test
 ```
 
 ## Development
-
-Run the complete validation suite before handing off a change:
 
 ```bash
 npm run check
@@ -132,37 +143,13 @@ npm run build
 npm test
 ```
 
-| Dependency | Role |
-| --- | --- |
-| [`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) | Pi CLI and RPC mode, executed inside a runner |
-| Node `node:sqlite` | Transactional pre-alpha control-plane metadata and migrations |
-| [Fastify](https://fastify.dev/) + `@fastify/cors` | Typed control-plane HTTP API |
-| [Zod](https://zod.dev/) | Validation for untrusted API, lease, and runner inputs |
-| TypeScript + `tsx` | Type checking and local TypeScript execution |
-
-Postgres, multi-node dispatch, object storage, and managed runner infrastructure are not product requirements. Add infrastructure only when a concrete self-hosted use case cannot be met by the single-server architecture.
-
-## Roadmap
-
-Milestones are ordered around a useful open-source server:
-
-1. **Complete — Durable server foundation:** durable records, authenticated lifecycle APIs, event replay, cancellation, and recovery.
-2. **Pi as the server runtime:** embed Pi's SDK in the local execution host and support durable sessions, native events, steering, and repository workspaces.
-3. **Self-hosted single-server release:** provide a documented Docker Compose installation with local credentials, workspace lifecycle, upgrades, backup, and restore.
-4. **Remote web workspace:** start, reconnect to, steer, cancel, and review Pi sessions from a focused browser interface.
-5. **Pi-native extensibility:** preserve Pi extensions, skills, prompts, themes, providers, packages, project trust, and extension interactions through the hosted runtime.
-6. **Git workflows and automation:** add reviewable branch/PR delivery plus optional API, webhook, schedule, GitHub, Linear, and Slack entry points.
-7. **Reliable always-on operation:** make long-running self-hosted use observable, bounded, recoverable, and maintainable without enterprise infrastructure.
+Use Node.js 22+, npm workspaces, strict TypeScript, ESM, Fastify, and Zod. Prefer small vertical slices and add infrastructure only for a demonstrated requirement.
 
 ## Security baseline
 
-Treat every repository and Pi package as executable code. Pi extensions run with the Pi host's permissions, so only install trusted packages and make project trust explicit. A self-hosted operator may choose persistent trusted workspaces or stronger container/VM isolation for untrusted work.
+Treat every repository, dependency, hook, and project Pi resource as executable untrusted input. Keep the API/runtime boundary, isolate every workspace, inject scoped credentials only when needed, bound and redact outbound records, enforce resource and network policy outside Pi, and guarantee explicit archive/delete cleanup.
 
-Keep credentials scoped, redact them from remote events, and never expose the Pi host directly to unauthenticated clients. Pi Cloud should use Pi's supported SDK and resource APIs rather than depending on its internal session-file format.
-
-## Contributing
-
-Prefer small vertical slices that preserve the control-plane/runner boundary. Do not add a dependency merely to anticipate a future feature; document the concrete requirement first.
+Keep host sockets, broad cloud credentials, and long-lived secrets outside Pi and repository code. Store Pi native session files as opaque runtime data.
 
 ## License
 

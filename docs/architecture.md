@@ -1,57 +1,115 @@
 # Architecture
 
+Read [product-scope.md](product-scope.md) for the product contract.
+
 ## Purpose
 
-Pi Cloud is an open-source, self-hosted server that keeps Pi available remotely on operator-owned infrastructure. It separates the network-facing control plane from the local Pi host: the control plane coordinates identity and durable records, while the Pi host owns repository workspaces and embeds Pi through its supported SDK.
+Pi Cloud makes an unmodified Pi session available from another device. It separates remote orchestration from repository execution while preserving Pi's native sessions and customization model.
 
-## Components
+## Topology
 
-### Control plane (`apps/api`)
+```text
+browser / CLI / local Pi extension
+                 │
+      authenticated HTTP + stream
+                 ▼
+       API and session router (`packages/api`)
+                 │
+       scoped runtime capability
+                 ▼
+        runtime worker (`packages/runner`)
+          ├── persistent workspace
+          ├── opaque Pi session files
+          ├── operator Pi agent directory
+          ├── scoped operation credentials
+          └── `pi --mode rpc`
+```
 
-Owns authentication, repository and session metadata, lifecycle history, scheduling, and the public event API. Metadata is durably stored in transactional SQLite for the single-server architecture. It does not mount workspaces or run repository commands.
+The first deployment runs the API and runtime worker on one operator-owned Linux server as separate processes.
 
-### Local Pi host (`apps/runner`)
+## API and session router
 
-Runs as part of the same self-hosted installation. It owns persistent repository workspaces and creates Pi `AgentSession` runtimes with `@earendil-works/pi-coding-agent`. It streams supported Pi events to the control plane and accepts prompts, steering, follow-ups, cancellation, and session replacement commands. Pi's `DefaultResourceLoader` remains the source of extensions, skills, prompt templates, themes, providers, packages, settings, and project trust behavior.
+`packages/api` authenticates clients, authorizes workspace and hosted-session access, stores lifecycle metadata, starts or attaches runtime workers, and routes the public bidirectional stream.
 
-The existing signed task lease remains an internal authorization boundary between the API and Pi host. It must not turn the product into a proprietary external runner service.
+HTTP handles create, list, attach, stop, archive, and delete operations. The bidirectional stream carries a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
 
-### Optional execution isolation
+## Runtime worker
 
-The operator chooses the execution boundary. A trusted personal server may use a persistent local workspace. Untrusted or unattended repositories should run the Pi host in a container, VM, micro-VM, or policy-controlled sandbox. Docker Compose is the default deployment shape; multi-tenant infrastructure and a managed microVM fleet are not baseline requirements.
+`packages/runner` opens one authorized workspace, resolves scoped credential references, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
 
-## Current vertical slice
+The worker process is disposable. Workspace and native Pi session data persist independently. A replacement worker resumes the native session through Pi's CLI and RPC operations.
 
-The authenticated `/v1/agents` API creates a durable conversation, initial finite run, and queued dispatch task for an exact repository revision. SQLite transactions record legal lifecycle transitions, idempotency, one active mutating run per agent, budgets, cancellation, atomic assignment, single-use lease redemption, checkout provenance, bounded recovery, and append-only events. User/service credentials authorize public records; a separate dispatcher credential claims work. Reconnectable SSE replays events by opaque cursor across API restarts.
+## Workspace
 
-This slice includes exact-revision checkout and durable checkout provenance, but it stops before Pi process startup. The current runner redeems one assignment, materializes the detached repository revision under hardened Git policy, and reports that evidence to the control plane.
+A workspace has a stable identity, owner, repository origin, root directory, Pi agent-directory reference, active native session reference, and lifecycle state. Repository and session data survive client disconnects and idle runtime shutdown.
+
+Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. Delete terminates execution and removes workspace data, credentials, and temporary files.
+
+## Pi process
+
+The worker launches the installed Pi CLI with `pi --mode rpc`. Pi owns prompts, steering, follow-ups, cancellation, turns, tools, compaction, model selection, session replacement, and session persistence.
+
+## Pi Cloud runtime extension
+
+A trusted global Pi package adds hosted capabilities required beyond the RPC protocol, such as reading safe session metadata or publishing a cloud-specific result. It uses Pi's public extension API and a local capability endpoint authorized for one hosted session.
+
+Users customize the runtime with ordinary Pi extensions, skills, prompts, providers, settings, packages, and project trust.
+
+## Lifecycle
+
+```text
+client creates or opens workspace
+→ API authorizes access
+→ worker opens the isolated workspace
+→ worker injects operation-scoped credentials
+→ worker starts `pi --mode rpc`
+→ client and Pi exchange RPC through the authenticated stream
+→ client disconnects while Pi may continue
+→ idle Pi process may stop
+→ later attachment restarts Pi and resumes its native session
+→ archive or delete performs bounded cleanup
+```
+
+A hosted session maps one-to-one to a native Pi session. Worker restarts remain infrastructure attempts within that session.
+
+## Public transport
+
+The public stream preserves Pi RPC records in an envelope containing protocol version, hosted-session ID, sequence, direction, and payload.
+
+The runtime boundary:
+
+- validates command and envelope schemas;
+- enforces record and cumulative size limits;
+- redacts configured secrets from outbound records;
+- applies explicit field policy;
+- preserves finalized Pi messages and settled state as authoritative.
+
+Reconnect uses Pi RPC state and entry cursors. Cloud metadata records connection and process state while Pi remains the canonical transcript.
 
 ## Trust boundaries
 
-| Boundary | Rule |
+| Boundary | Contract |
 | --- | --- |
-| Browser → control plane | Authenticate every request and apply the self-hosted instance's repository/session access policy. |
-| Control plane → Pi host | Use authenticated internal commands; the existing signed lease provides single-use authorization for work starts. |
-| Pi host → repository | Treat dependencies and project-local Pi resources as executable code; honor Pi project trust and operator policy. |
-| Pi host → external network | Make effective Git, package, model, and extension access visible and configurable by the operator. |
-| Pi host → control plane | Redact configured secrets; accept an allowlisted event schema and bounded artifact sizes. |
+| Client → API | Authenticate the request and authorize its workspace and hosted session. |
+| API → runtime worker | Grant authority scoped to one workspace, hosted session, operation, and lifetime. |
+| Runtime → repository | Execute repository code and project Pi resources inside the workspace boundary. |
+| Runtime → instance resources | Load operator-approved Pi resources inside the runtime boundary. |
+| Runtime → network | Apply the operator network policy outside Pi. |
+| Runtime → API/client | Validate envelopes, bound records, and redact scoped credentials. |
+| Pi extension → cloud bridge | Expose allowlisted capabilities scoped to the hosted session. |
 
-## Task leases
+## Persistence
 
-The control plane signs a versioned, five-minute Ed25519 lease that binds one lease ID, task ID, HTTPS repository URL, immutable revision, issuer, and runner-pool audience. Atomic dispatch persists the assignment and token digest; redemption verifies the signed claims and assigned runner exactly once before repository execution. Heartbeats maintain the redeemed assignment without extending the cryptographic redemption lifetime. The runner also identifies itself explicitly so durable provenance can be tied to the redeemed assignment before checkout. See [task-leases.md](task-leases.md) and [control-plane-api.md](control-plane-api.md).
+Persistent data includes workspace files, Git metadata, operator Pi resources, opaque native Pi sessions, and lifecycle metadata. Runtime processes, temporary files, and injected operation credentials have bounded lifetimes.
 
-## Pi integration
+## First vertical slice
 
-The local Pi host embeds `@earendil-works/pi-coding-agent` and creates `AgentSessionRuntime` instances through the supported SDK. This gives Pi Cloud typed session replacement, event streaming, model control, tools, settings, and resource loading without reimplementing Pi or parsing its internal session files.
-
-Pi Cloud must preserve Pi's extension contract. Global and project extensions, skills, prompt templates, themes, providers, and packages load through Pi's resource APIs with their normal provenance and project-trust rules. Web clients should bridge supported extension dialogs, notifications, status, and widgets; terminal-only UI may degrade explicitly rather than being silently treated as available.
-
-## Deliberate non-goals
-
-- A proprietary hosted control plane or paid runner fleet
-- Enterprise multi-tenant infrastructure
-- Browser-based IDE
-- Reimplementing Pi sessions, tools, providers, or extension APIs
-- Requiring microVMs for trusted single-user installations
-
-The first target vertical slice is: connect to a self-hosted server → open a repository workspace → create an embedded Pi session → stream and steer it remotely → reconnect to the durable session → review its result.
+```text
+open one workspace
+→ start unmodified Pi RPC in the runner
+→ attach an authenticated client
+→ prompt and stream native Pi events
+→ disconnect and reconnect
+→ resume the same native Pi session
+→ stop the process while retaining the workspace
+```

@@ -4,7 +4,7 @@ import { immutableRevisionSchema, repositoryUrlSchema } from "./repository.js";
 
 const absolutePathSchema = z.string().min(1).refine(isAbsolute, "path must be absolute");
 
-/** A reference to a credential that the runner resolves without putting its value on the wire. */
+/** Public metadata naming one credential that may be resolved into a scoped runtime claim. */
 export const hostedCredentialReferenceSchema = z
   .object({
     name: z.string().min(1).max(200),
@@ -82,7 +82,52 @@ export const hostedRuntimeLaunchSchema = z
   })
   .strict();
 
+const hostedCredentialValueSchema = z
+  .object({
+    reference: z.string().min(1).max(1_024),
+    value: z.string().min(1).max(65_536),
+  })
+  .strict();
+
+/** Ephemeral dispatcher response containing only credentials granted to the claimed workspace. */
+export const hostedRuntimeClaimSchema = z
+  .object({
+    launch: hostedRuntimeLaunchSchema,
+    credentials: z.array(hostedCredentialValueSchema).max(100),
+    tunnel: z
+      .object({
+        url: z.string().url(),
+        token: z.string().min(32).max(200),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((claim, context) => {
+    const expected = new Set(claim.launch.credentialReferences.map((credential) => credential.reference));
+    const supplied = new Set<string>();
+    let credentialBytes = 0;
+    for (const [index, credential] of claim.credentials.entries()) {
+      credentialBytes += Buffer.byteLength(credential.value, "utf8");
+      if (!expected.has(credential.reference)) {
+        context.addIssue({ code: "custom", message: "claim credential is not granted by the launch", path: ["credentials", index, "reference"] });
+      }
+      if (supplied.has(credential.reference)) {
+        context.addIssue({ code: "custom", message: "claim credential references must be unique", path: ["credentials", index, "reference"] });
+      }
+      supplied.add(credential.reference);
+    }
+    for (const reference of expected) {
+      if (!supplied.has(reference)) {
+        context.addIssue({ code: "custom", message: "claim is missing a granted credential", path: ["credentials"] });
+      }
+    }
+    if (credentialBytes > 65_536) {
+      context.addIssue({ code: "custom", message: "claim credential values exceed 65536 UTF-8 bytes", path: ["credentials"] });
+    }
+  });
+
 export type HostedCredentialReference = z.infer<typeof hostedCredentialReferenceSchema>;
 export type HostedRuntimeLimits = z.infer<typeof hostedRuntimeLimitsSchema>;
 export type NativePiSessionTarget = z.infer<typeof nativePiSessionTargetSchema>;
 export type HostedRuntimeLaunch = z.infer<typeof hostedRuntimeLaunchSchema>;
+export type HostedRuntimeClaim = z.infer<typeof hostedRuntimeClaimSchema>;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   hostedRpcClientEnvelopeSchema,
+  hostedRuntimeClaimSchema,
   hostedRuntimeLaunchSchema,
   parseBoundedHostedRpcEnvelope,
 } from "./index.js";
@@ -39,6 +40,18 @@ test("hosted runtime launch requires immutable, absolute, explicitly trusted inp
     ...launch,
     credentialReferences: [...launch.credentialReferences, ...launch.credentialReferences],
   }));
+
+  const claim = {
+    launch,
+    credentials: [{ reference: "vault://provider/key", value: "scoped-secret" }],
+    tunnel: { url: "wss://pi-cloud.example.com/tunnel", token: "a".repeat(32) },
+  };
+  assert.equal(hostedRuntimeClaimSchema.parse(claim).credentials.length, 1);
+  assert.throws(() => hostedRuntimeClaimSchema.parse({ ...claim, credentials: [] }), /missing a granted credential/);
+  assert.throws(() => hostedRuntimeClaimSchema.parse({
+    ...claim,
+    credentials: [{ reference: "vault://other/key", value: "wrong-secret" }],
+  }), /not granted by the launch/);
 });
 
 test("client RPC validation preserves request ids and additional native JSON payload", () => {

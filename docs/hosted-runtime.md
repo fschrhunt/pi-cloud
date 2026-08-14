@@ -226,7 +226,7 @@ The Compose worker reaches a host-run API through `host.docker.internal`. For th
 
 Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. The shared operator Pi agent directory is mounted read-only.
 
-The trusted root supervisor keeps dispatcher authority and the full workspace volume. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives a writable `HOME` under its own hosted session directory.
+The trusted root supervisor keeps dispatcher authority and the full workspace volume. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives writable `HOME`, `TMPDIR`, `TMP`, and `TEMP` directories under its own hosted session directory.
 
 Compose retains workspace data until the operator explicitly removes the local provider volume. After deleting or archiving any metadata that must be retained, run `docker compose down --volumes` to remove all local checkouts and native session files. Per-workspace physical deletion is not part of this M2 Docker provider.
 

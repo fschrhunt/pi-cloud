@@ -32,6 +32,7 @@ function config(): ApiConfig {
       maxCumulativeBytes: 1_000_000,
     },
     hostedCredentialReferences: [],
+    hostedCredentialValues: {},
   };
 }
 

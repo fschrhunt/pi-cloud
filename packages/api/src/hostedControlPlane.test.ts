@@ -67,7 +67,7 @@ test("workspace creation is owner-scoped, idempotent, and resolves configured cr
   );
 });
 
-test("hosted session lifecycle enforces legal transitions and requires stopped state to archive or delete", () => {
+test("hosted session lifecycle enforces legal transitions before archive", () => {
   const { controlPlane } = newControlPlane();
   const workspace = controlPlane.createWorkspace(
     principal,
@@ -80,7 +80,6 @@ test("hosted session lifecycle enforces legal transitions and requires stopped s
   assert.equal(created.state, "queued");
 
   assert.throws(() => controlPlane.archiveHostedSession(principal, created.id), /must be stopped/);
-  assert.throws(() => controlPlane.deleteHostedSession(principal, created.id), /must be stopped or archived/);
 
   const stopped = controlPlane.stopHostedSession(principal, created.id);
   assert.equal(stopped.state, "stopped");
@@ -89,9 +88,25 @@ test("hosted session lifecycle enforces legal transitions and requires stopped s
   const archived = controlPlane.archiveHostedSession(principal, created.id);
   assert.equal(archived.state, "archived");
   assert.throws(() => controlPlane.startHostedSession(principal, created.id), /Cannot transition/);
+  assert.equal(controlPlane.getHostedSession(principal, created.id).state, "archived");
+});
 
-  controlPlane.deleteHostedSession(principal, created.id);
-  assert.throws(() => controlPlane.getHostedSession(principal, created.id), /not found/);
+test("a workspace permits only one queued, starting, or running session", () => {
+  const { controlPlane } = newControlPlane();
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-single-active",
+  );
+  const first = controlPlane.createHostedSession(principal, workspace.id, {}, "session-active-1");
+  assert.throws(
+    () => controlPlane.createHostedSession(principal, workspace.id, {}, "session-active-2"),
+    /already has an active hosted session/,
+  );
+  controlPlane.stopHostedSession(principal, first.id);
+  const second = controlPlane.createHostedSession(principal, workspace.id, {}, "session-active-2");
+  assert.equal(second.state, "queued");
+  assert.throws(() => controlPlane.startHostedSession(principal, first.id), /already has an active hosted session/);
 });
 
 test("claiming a hosted runtime is atomic, mints a validated launch, and derives a wss tunnel URL", () => {
@@ -230,5 +245,6 @@ test("stopping a session with a live runtime tunnel sends the out-of-band pi_clo
 
   const stopped = controlPlane.stopHostedSession(principal, session.id);
   assert.equal(stopped.state, "stopped");
+  assert.throws(() => controlPlane.archiveHostedSession(principal, session.id), /still stopping/);
   assert.deepEqual(sent, [{ type: "pi_cloud_stop" }]);
 });

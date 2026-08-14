@@ -87,11 +87,10 @@ export class HostedControlPlane {
   }
 
   archiveHostedSession(principal: Principal, sessionId: string): HostedSession {
+    if (this.router.hasRuntime(sessionId)) {
+      throw conflict("session_runtime_active", "Hosted session runtime is still stopping");
+    }
     return this.store.archiveHostedSession(principal.id, sessionId, this.clock());
-  }
-
-  deleteHostedSession(principal: Principal, sessionId: string): void {
-    this.store.deleteHostedSession(principal.id, sessionId);
   }
 
   /** Closes ephemeral routed sockets before the durable store is shut down. */

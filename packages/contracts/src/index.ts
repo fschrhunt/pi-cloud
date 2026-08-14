@@ -10,10 +10,12 @@ export {
 export {
   hostedCredentialReferenceSchema,
   hostedCredentialReferencesSchema,
+  hostedRuntimeClaimSchema,
   hostedRuntimeLaunchSchema,
   hostedRuntimeLimitsSchema,
   nativePiSessionTargetSchema,
   type HostedCredentialReference,
+  type HostedRuntimeClaim,
   type HostedRuntimeLaunch,
   type HostedRuntimeLimits,
   type NativePiSessionTarget,

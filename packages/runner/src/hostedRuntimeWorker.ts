@@ -3,10 +3,10 @@ import { promises as fs } from "node:fs";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import {
-  hostedRuntimeLaunchSchema,
+  hostedRuntimeClaimSchema,
   parseBoundedHostedRpcClientEnvelope,
   parseBoundedHostedRpcEnvelope,
-  type HostedCredentialReference,
+  type HostedRuntimeClaim,
   type HostedRuntimeLaunch,
   type PiRpcRecord,
 } from "@pi-cloud/contracts";
@@ -17,25 +17,13 @@ import { authorizeHostedRuntimeRealPaths, type HostedRuntimeAuthorizedRoots } fr
 import { PiRpcSupervisor } from "./piRpcSupervisor.js";
 
 const execFileAsync = promisify(execFile);
-const claimResponseSchema = z
-  .object({
-    launch: hostedRuntimeLaunchSchema,
-    tunnel: z
-      .object({
-        url: z.string().url(),
-        token: z.string().min(1),
-      })
-      .strict(),
-  })
-  .strict();
 const stopControlSchema = z
   .object({
     type: z.enum(["stop", "pi_cloud_stop"]),
   })
   .strict();
 
-export type HostedRuntimeClaim = z.infer<typeof claimResponseSchema>;
-export type ResolvedHostedCredentials = {
+type ResolvedHostedCredentials = {
   environment: Record<string, string>;
   secrets: string[];
 };
@@ -48,7 +36,6 @@ export type HostedRuntimeWorkerOptions = {
   runnerId: string;
   authorizedRoots: HostedRuntimeAuthorizedRoots;
   piExecutable?: string;
-  resolveCredentials?: (references: readonly HostedCredentialReference[]) => Promise<ResolvedHostedCredentials>;
   checkout?: typeof checkoutExactRevision;
   createWebSocket?: (url: string, token: string) => WebSocket;
   signal?: AbortSignal;
@@ -74,7 +61,7 @@ export class HostedRuntimeDispatcherClient {
     });
     if (response.status === 204) return null;
     if (!response.ok) throw new Error(`Hosted runtime claim failed with ${response.status}`);
-    return claimResponseSchema.parse(await response.json());
+    return hostedRuntimeClaimSchema.parse(await response.json());
   }
 }
 
@@ -84,23 +71,26 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   if (!claim) return false;
 
   const launch = claim.launch;
-  await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
-  await materializeRepository(launch, options.checkout ?? checkoutExactRevision);
-
-  const socket = (options.createWebSocket ?? createAuthenticatedWebSocket)(claim.tunnel.url, claim.tunnel.token);
-  await waitForOpen(socket);
   let credentials: ResolvedHostedCredentials;
   try {
-    credentials = await (options.resolveCredentials ?? rejectCredentialReferences)(launch.credentialReferences);
-  } catch (error: unknown) {
-    if (socket.readyState === WebSocket.OPEN) socket.close(1008, "runtime credentials unavailable");
-    throw error;
+    credentials = resolveClaimCredentials(claim);
+  } finally {
+    scrubClaimCredentials(claim);
   }
   try {
-    validateResolvedCredentials(launch, credentials);
+    await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
+    await materializeRepository(launch, options.checkout ?? checkoutExactRevision);
   } catch (error: unknown) {
     scrubResolvedCredentials(credentials);
-    if (socket.readyState === WebSocket.OPEN) socket.close(1008, "invalid runtime credentials");
+    throw error;
+  }
+
+  let socket: WebSocket;
+  try {
+    socket = (options.createWebSocket ?? createAuthenticatedWebSocket)(claim.tunnel.url, claim.tunnel.token);
+    await waitForOpen(socket);
+  } catch (error: unknown) {
+    scrubResolvedCredentials(credentials);
     throw error;
   }
   let outboundSequence = 0;
@@ -257,17 +247,19 @@ function scrubResolvedCredentials(credentials: ResolvedHostedCredentials): void 
   credentials.secrets.fill("");
 }
 
-function validateResolvedCredentials(launch: HostedRuntimeLaunch, resolved: ResolvedHostedCredentials): void {
-  const allowedNames = new Set(launch.credentialReferences.map((reference) => reference.environmentVariable));
-  for (const [name, value] of Object.entries(resolved.environment)) {
-    if (!allowedNames.has(name)) throw new Error(`Resolved credential ${name} was not authorized by the launch`);
-    if (value.length === 0) throw new Error(`Resolved credential ${name} is empty`);
+function resolveClaimCredentials(claim: HostedRuntimeClaim): ResolvedHostedCredentials {
+  const values = new Map(claim.credentials.map((credential) => [credential.reference, credential.value]));
+  const environment: Record<string, string> = {};
+  for (const credential of claim.launch.credentialReferences) {
+    const value = values.get(credential.reference);
+    if (!value) throw new Error(`Claim credential ${credential.reference} is unavailable`);
+    environment[credential.environmentVariable] = value;
   }
+  return { environment, secrets: [...values.values()] };
 }
 
-async function rejectCredentialReferences(references: readonly HostedCredentialReference[]): Promise<ResolvedHostedCredentials> {
-  if (references.length > 0) throw new Error("Hosted credential references require a configured resolver");
-  return { environment: {}, secrets: [] };
+function scrubClaimCredentials(claim: HostedRuntimeClaim): void {
+  for (const credential of claim.credentials) credential.value = "";
 }
 
 function waitForOpen(socket: WebSocket): Promise<void> {

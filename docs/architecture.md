@@ -31,7 +31,7 @@ The first deployment runs the API and runtime worker on one operator-owned Linux
 
 `packages/api` authenticates clients, authorizes workspace and hosted-session access, stores lifecycle metadata, starts or attaches runtime workers, and routes the public bidirectional stream.
 
-HTTP handles create, list, get, start, stop, archive, and delete operations. Authenticated public and internal WebSockets carry a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
+HTTP handles create, list, get, start, stop, and archive operations. Authenticated public and internal WebSockets carry a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
 
 ## Runtime worker
 
@@ -43,7 +43,7 @@ The trusted worker supervisor is disposable. It retains dispatcher authority, as
 
 A workspace has a stable identity, owner, repository origin, root directory, Pi agent-directory reference, active native session reference, and lifecycle state. Repository and session data survive client disconnects and idle runtime shutdown.
 
-Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. Delete terminates execution and removes workspace data, credentials, and temporary files.
+Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. M2 intentionally omits metadata-only deletion because persistent data must not be orphaned; the local provider supports explicit volume-wide cleanup.
 
 ## Pi process
 
@@ -67,7 +67,7 @@ client creates or opens workspace
 → client disconnects while Pi may continue
 → idle Pi process may stop
 → later attachment restarts Pi and resumes its native session
-→ archive or delete performs bounded cleanup
+→ archive retains data, or an operator reset removes the local provider volume
 ```
 
 A hosted session maps one-to-one to a native Pi session. Worker restarts remain infrastructure attempts within that session.

@@ -117,13 +117,13 @@ npm run build
 npm test
 ```
 
-Run the hosted runtime smoke flow against an already-running local API and a real HTTPS repository revision:
+Run the hosted runtime smoke flow against a dedicated temporary API and a real HTTPS repository revision:
 
 ```bash
 npm run smoke:hosted
 ```
 
-It requires the operator-facing hosted runtime variables from [.env.example](.env.example), a built runner (`npm run build`), a reachable `pi` executable, and valid Pi model credentials/settings.
+It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), a reachable `pi` executable, and valid Pi model credentials/settings. The command removes its temporary API database and runtime roots on every exit.
 
 ## Repository
 

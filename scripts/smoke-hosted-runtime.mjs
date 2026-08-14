@@ -1,36 +1,46 @@
 #!/usr/bin/env node
 
-/** Exercises the single-operator hosted runtime flow against a local API and real Pi CLI. */
-import { access, mkdir } from "node:fs/promises";
+/** Exercises an isolated single-operator hosted runtime flow against a dedicated API and real Pi CLI. */
+import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { randomUUID } from "node:crypto";
-import { delimiter, resolve } from "node:path";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 import WebSocket from "ws";
 
+const apiAppEntry = resolve("packages/api/dist/app.js");
+const apiConfigEntry = resolve("packages/api/dist/config.js");
 const runnerEntry = resolve("packages/runner/dist/runner.js");
 const nodeModulesBin = resolve("node_modules/.bin");
-const defaultPrompt = "Reply with the exact text SMOKE_OK on a single line.";
+const defaultExpectedMarker = "SMOKE_OK";
+const maxDiagnosticBytes = 32_768;
 
 async function main() {
-  const config = readConfig(process.env);
-  await assertBuiltRunner();
-  assertPiExecutable(config.piExecutable);
-  await ensureRuntimeRoots(config);
-  await checkApiHealth(config.apiBaseUrl);
-
-  const workspace = await createWorkspace(config);
-  const session = await createSession(config, workspace.id);
-  const expectedWorkspaceRoot = workspace.root;
-
+  const config = await readConfig(process.env);
   /** @type {RunnerProcess[]} */
   const runners = [];
   /** @type {HostedClientConnection[]} */
   const clients = [];
+  /** @type {ApiProcess | undefined} */
+  let api;
   let finalSummary;
 
   try {
+    await assertBuiltRuntime();
+    assertPiExecutable(config.piExecutable);
+    await ensureRuntimeRoots(config);
+
+    api = new ApiProcess(config);
+    await api.waitForHealth(30_000);
+
+    const workspace = await createWorkspace(config);
+    const session = await createSession(config, workspace.id);
+    const expectedWorkspaceRoot = workspace.root;
+
     const firstRunner = startHostedRunner(config, "run-1");
     runners.push(firstRunner);
 
@@ -41,10 +51,7 @@ async function main() {
 
     const firstClient = await openHostedClient(config, session.id);
     clients.push(firstClient);
-    const promptResult = await promptAndWait(firstClient, session.id, config.prompt, 180_000);
-    if (!promptResult.messageText.includes("SMOKE_OK")) {
-      throw new Error(`Prompt completed without the expected marker. Final message: ${promptResult.messageText}`);
-    }
+    const promptResult = await promptAndWait(firstClient, session.id, config.prompt, config.expectedMarker, 180_000);
     await firstClient.close();
 
     const reconnectedClient = await openHostedClient(config, session.id);
@@ -73,6 +80,7 @@ async function main() {
     const resumedClient = await openHostedClient(config, session.id);
     clients.push(resumedClient);
     const resumedState = await getState(resumedClient, session.id, initialNative, 30_000);
+    const resumedEntries = await getEntries(resumedClient, session.id, config.prompt, config.expectedMarker, 30_000);
     await resumedClient.close();
 
     await stopSession(config, session.id);
@@ -95,10 +103,15 @@ async function main() {
       firstStartedAt: firstRunningSession.startedAt,
       secondStartedAt: secondRunningSession.startedAt,
       reconnectState,
+      resumedEntries,
     };
+
+    await deleteSession(config, session.id);
   } finally {
     for (const client of clients) await client.close().catch(() => undefined);
     for (const runner of runners) await runner.stop().catch(() => undefined);
+    await api?.stop().catch(() => undefined);
+    await rm(config.controlPlaneRoot, { recursive: true, force: true });
   }
 
   console.log("Hosted runtime smoke passed.");
@@ -108,81 +121,122 @@ async function main() {
   console.log(`Prompt result: ${finalSummary.promptMessage}`);
 }
 
-function readConfig(env) {
-  const apiBaseUrl = parseUrl(
-    env.PI_CLOUD_SMOKE_API_BASE_URL
-      ?? env.PI_CLOUD_PUBLIC_BASE_URL
-      ?? env.PI_CLOUD_HOSTED_DISPATCHER_URL
-      ?? `http://127.0.0.1:${env.PORT ?? "3000"}`,
-    "PI_CLOUD_SMOKE_API_BASE_URL",
-  );
+async function readConfig(env) {
   const repositoryUrl = required(env.PI_CLOUD_SMOKE_REPOSITORY_URL, "PI_CLOUD_SMOKE_REPOSITORY_URL");
   const revision = required(env.PI_CLOUD_SMOKE_REVISION, "PI_CLOUD_SMOKE_REVISION");
-  const userToken = env.PI_CLOUD_SMOKE_USER_TOKEN ?? firstApiCredentialToken(env.PI_CLOUD_API_CREDENTIALS);
-  const dispatcherToken = env.PI_CLOUD_HOSTED_DISPATCHER_TOKEN ?? env.PI_CLOUD_DISPATCHER_TOKEN;
-  if (!dispatcherToken) throw new Error("Missing PI_CLOUD_HOSTED_DISPATCHER_TOKEN or PI_CLOUD_DISPATCHER_TOKEN for the hosted runner process");
-
-  const configuredReferenceNames = parseCredentialReferenceNames(
+  const expectedMarker = env.PI_CLOUD_SMOKE_EXPECTED_MARKER ?? defaultExpectedMarker;
+  if (expectedMarker.length === 0) throw new Error("PI_CLOUD_SMOKE_EXPECTED_MARKER must not be empty");
+  const hostedCredentialReferences = parseHostedCredentialReferences(env.PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES);
+  const credentialReferenceNames = parseCredentialReferenceNames(
     env.PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES,
-    env.PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES,
+    hostedCredentialReferences,
   );
-  const hostedCredentialsJson = env.PI_CLOUD_HOSTED_CREDENTIALS;
-  const hostedCredentialValues = parseHostedCredentialValues(hostedCredentialsJson, configuredReferenceNames);
-  const runnerDispatcherUrl = parseUrl(env.PI_CLOUD_HOSTED_DISPATCHER_URL ?? apiBaseUrl.toString(), "PI_CLOUD_HOSTED_DISPATCHER_URL");
+  const hostedCredentials = parseHostedCredentialValues(env.PI_CLOUD_HOSTED_CREDENTIALS, hostedCredentialReferences);
+  const controlPlaneRoot = await mkdtemp(join(tmpdir(), "pi-cloud-smoke-"));
 
-  return {
-    apiBaseUrl,
-    runnerDispatcherUrl,
-    repositoryUrl,
-    revision,
-    projectTrust: env.PI_CLOUD_SMOKE_PROJECT_TRUST === "trusted" ? "trusted" : "untrusted",
-    prompt: env.PI_CLOUD_SMOKE_PROMPT ?? defaultPrompt,
-    userToken,
-    dispatcherToken,
-    runnerIdBase: env.PI_CLOUD_RUNNER_ID ?? `smoke-hosted-${process.pid}`,
-    workspaceRoots: env.PI_CLOUD_HOSTED_WORKSPACE_ROOTS ?? env.PI_CLOUD_RUNTIME_WORKSPACE_ROOT ?? "/var/lib/pi-cloud/workspaces",
-    sessionRoots: env.PI_CLOUD_HOSTED_SESSION_ROOTS ?? env.PI_CLOUD_RUNTIME_WORKSPACE_ROOT ?? "/var/lib/pi-cloud/workspaces",
-    agentRoots: env.PI_CLOUD_HOSTED_AGENT_ROOTS ?? env.PI_CLOUD_RUNTIME_AGENT_DIRECTORY ?? "/var/lib/pi-cloud/agent",
-    hostedCredentialsJson,
-    hostedCredentialValues,
-    credentialReferenceNames: configuredReferenceNames,
-    piExecutable: env.PI_CLOUD_PI_EXECUTABLE ?? "pi",
-    secrets: [userToken, dispatcherToken, ...hostedCredentialValues],
-  };
+  try {
+    const apiPort = await reserveUnusedLoopbackPort();
+    const apiBaseUrl = parseUrl(`http://127.0.0.1:${apiPort}`, "generated API base URL");
+    const dispatcherToken = randomToken();
+    const userToken = randomToken();
+    const taskLeasePrivateKey = generateTaskLeasePrivateKey();
+    const apiCredentialsJson = JSON.stringify([
+      { token: userToken, subjectId: "smoke-user", type: "user", displayName: "Hosted Smoke User" },
+    ]);
+    const hostedCredentialReferencesJson = hostedCredentialReferences.length > 0
+      ? JSON.stringify(hostedCredentialReferences)
+      : undefined;
+
+    return {
+      apiBaseUrl,
+      apiPort,
+      repositoryUrl,
+      revision,
+      projectTrust: env.PI_CLOUD_SMOKE_PROJECT_TRUST === "trusted" ? "trusted" : "untrusted",
+      prompt: env.PI_CLOUD_SMOKE_PROMPT ?? `Reply with the exact text ${expectedMarker} on a single line.`,
+      expectedMarker,
+      userToken,
+      dispatcherToken,
+      taskLeasePrivateKey,
+      apiCredentialsJson,
+      runnerDispatcherUrl: apiBaseUrl,
+      runnerIdBase: `smoke-hosted-${process.pid}-${randomUUID()}`,
+      controlPlaneRoot,
+      databasePath: join(controlPlaneRoot, "control-plane.sqlite"),
+      workspaceRoots: join(controlPlaneRoot, "workspaces"),
+      sessionRoots: join(controlPlaneRoot, "workspaces"),
+      agentRoots: join(controlPlaneRoot, "agent"),
+      hostedCredentialReferencesJson,
+      hostedCredentialsJson: hostedCredentials.json,
+      hostedCredentialValues: hostedCredentials.secrets,
+      credentialReferenceNames,
+      piExecutable: env.PI_CLOUD_PI_EXECUTABLE ?? "pi",
+      secrets: [
+        userToken,
+        dispatcherToken,
+        taskLeasePrivateKey,
+        apiCredentialsJson,
+        hostedCredentials.json,
+        ...hostedCredentials.secrets,
+      ],
+    };
+  } catch (error) {
+    await rm(controlPlaneRoot, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
-function firstApiCredentialToken(value) {
-  if (!value) {
-    throw new Error("Missing PI_CLOUD_SMOKE_USER_TOKEN and PI_CLOUD_API_CREDENTIALS; set one API bearer token for the public smoke client");
-  }
+function parseHostedCredentialReferences(value) {
+  if (!value) return [];
   let parsed;
   try {
     parsed = JSON.parse(value);
   } catch {
-    throw new Error("PI_CLOUD_API_CREDENTIALS must be valid JSON or PI_CLOUD_SMOKE_USER_TOKEN must be set explicitly");
-  }
-  if (!Array.isArray(parsed) || parsed.length === 0 || typeof parsed[0]?.token !== "string" || parsed[0].token.length === 0) {
-    throw new Error("PI_CLOUD_API_CREDENTIALS must contain at least one { token } entry or PI_CLOUD_SMOKE_USER_TOKEN must be set explicitly");
-  }
-  return parsed[0].token;
-}
-
-function parseCredentialReferenceNames(explicitValue, configuredValue) {
-  if (explicitValue) return parseNameList(explicitValue, "PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES");
-  if (!configuredValue) return [];
-  let parsed;
-  try {
-    parsed = JSON.parse(configuredValue);
-  } catch {
-    throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES must be valid JSON if PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES is omitted");
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES must be valid JSON");
   }
   if (!Array.isArray(parsed)) throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES must be a JSON array");
-  return parsed.map((entry) => {
-    if (typeof entry?.name !== "string" || entry.name.length === 0) {
-      throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES entries must include a non-empty name");
+  const names = new Set();
+  const environmentVariables = new Set();
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}] must be an object`);
     }
-    return entry.name;
+    const keys = Object.keys(entry);
+    if (keys.some((key) => !["name", "reference", "environmentVariable"].includes(key))) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}] contains an unsupported field`);
+    }
+    const { name, reference, environmentVariable } = entry;
+    if (typeof name !== "string" || name.length === 0 || name.length > 200) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].name must be a 1-200 character string`);
+    }
+    if (typeof reference !== "string" || reference.length === 0 || reference.length > 1024) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].reference must be a 1-1024 character string`);
+    }
+    if (typeof environmentVariable !== "string" || !/^[A-Z_][A-Z0-9_]*$/u.test(environmentVariable)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].environmentVariable must be a valid environment variable name`);
+    }
+    if (names.has(name)) throw new Error(`Duplicate hosted credential reference name: ${name}`);
+    if (environmentVariables.has(environmentVariable)) {
+      throw new Error(`Duplicate hosted credential environment variable: ${environmentVariable}`);
+    }
+    names.add(name);
+    environmentVariables.add(environmentVariable);
+    return { name, reference, environmentVariable };
   });
+}
+
+function parseCredentialReferenceNames(explicitValue, configuredReferences) {
+  const names = explicitValue
+    ? parseNameList(explicitValue, "PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES")
+    : configuredReferences.map((entry) => entry.name);
+  const configuredNames = new Set(configuredReferences.map((entry) => entry.name));
+  const seen = new Set();
+  for (const name of names) {
+    if (seen.has(name)) throw new Error(`Duplicate requested credential reference name: ${name}`);
+    seen.add(name);
+    if (!configuredNames.has(name)) throw new Error(`Unknown credential reference requested by smoke config: ${name}`);
+  }
+  return names;
 }
 
 function parseNameList(value, name) {
@@ -201,13 +255,16 @@ function parseNameList(value, name) {
   return value.split(",").map((entry) => entry.trim()).filter(Boolean);
 }
 
-function parseHostedCredentialValues(value, referenceNames) {
-  if (referenceNames.length === 0) return [];
+function parseHostedCredentialValues(value, references) {
   if (!value) {
-    throw new Error(
-      `Missing PI_CLOUD_HOSTED_CREDENTIALS for requested hosted credential references: ${referenceNames.join(", ")}`,
-    );
+    if (references.length > 0) {
+      throw new Error(
+        `Missing PI_CLOUD_HOSTED_CREDENTIALS for configured hosted credential references: ${references.map((entry) => entry.name).join(", ")}`,
+      );
+    }
+    return { json: undefined, secrets: [] };
   }
+
   let parsed;
   try {
     parsed = JSON.parse(value);
@@ -217,11 +274,39 @@ function parseHostedCredentialValues(value, referenceNames) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("PI_CLOUD_HOSTED_CREDENTIALS must be a JSON object mapping reference strings to credential values");
   }
-  return Object.values(parsed).filter((entry) => typeof entry === "string" && entry.length > 0);
+  let credentialBytes = 0;
+  for (const [reference, credentialValue] of Object.entries(parsed)) {
+    if (reference.length === 0 || reference.length > 1024) {
+      throw new Error("PI_CLOUD_HOSTED_CREDENTIALS references must be 1-1024 characters");
+    }
+    if (typeof credentialValue !== "string" || credentialValue.length === 0 || credentialValue.length > 65_536) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS[${reference}] must be a 1-65536 character string`);
+    }
+    credentialBytes += Buffer.byteLength(credentialValue, "utf8");
+  }
+  if (credentialBytes > 65_536) throw new Error("PI_CLOUD_HOSTED_CREDENTIALS values exceed 65536 UTF-8 bytes");
+
+  const expectedReferences = new Set(references.map((entry) => entry.reference));
+  for (const reference of expectedReferences) {
+    if (!(reference in parsed)) throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS is missing configured reference: ${reference}`);
+  }
+  for (const reference of Object.keys(parsed)) {
+    if (!expectedReferences.has(reference)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS contains a value without a configured reference: ${reference}`);
+    }
+  }
+  if (references.length === 0 && Object.keys(parsed).length > 0) {
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIALS requires PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES");
+  }
+  return { json: references.length > 0 ? JSON.stringify(parsed) : undefined, secrets: Object.values(parsed) };
 }
 
-async function assertBuiltRunner() {
-  await assertPathExists(runnerEntry, "built hosted runner entrypoint");
+async function assertBuiltRuntime() {
+  await Promise.all([
+    assertPathExists(apiAppEntry, "built API app entrypoint"),
+    assertPathExists(apiConfigEntry, "built API config entrypoint"),
+    assertPathExists(runnerEntry, "built hosted runner entrypoint"),
+  ]);
 }
 
 async function ensureRuntimeRoots(config) {
@@ -245,11 +330,6 @@ function assertPiExecutable(piExecutable) {
   if (result.error) {
     throw new Error(`Failed to invoke ${piExecutable}: ${result.error.message}`);
   }
-}
-
-async function checkApiHealth(apiBaseUrl) {
-  const response = await fetch(new URL("/health", apiBaseUrl));
-  if (!response.ok) throw new Error(`API health check failed with ${response.status}`);
 }
 
 async function createWorkspace(config) {
@@ -315,6 +395,15 @@ async function stopSession(config, sessionId) {
   });
 }
 
+async function deleteSession(config, sessionId) {
+  return requestJson(config, {
+    method: "DELETE",
+    path: `/v1/hosted-sessions/${sessionId}`,
+    token: config.userToken,
+    expectedStatus: 204,
+  });
+}
+
 async function requestJson(config, options) {
   const response = await fetch(new URL(options.path, config.apiBaseUrl), {
     method: options.method,
@@ -369,6 +458,100 @@ function startHostedRunner(config, suffix) {
   return new RunnerProcess(config, suffix);
 }
 
+function apiBootstrapSource() {
+  return `
+    import { buildApp } from ${JSON.stringify(pathToFileURL(apiAppEntry).href)};
+    import { readApiConfig } from ${JSON.stringify(pathToFileURL(apiConfigEntry).href)};
+    const app = await buildApp(readApiConfig(process.env));
+    const stop = async () => {
+      try {
+        await app.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(error);
+        process.exit(1);
+      }
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    await app.listen({ host: "127.0.0.1", port: Number.parseInt(process.env.PORT ?? "0", 10) });
+  `;
+}
+
+/** Owns the dedicated built API child and exposes redacted, bounded failure diagnostics. */
+class ApiProcess {
+  constructor(config) {
+    this.config = config;
+    this.secrets = config.secrets;
+    this.stdout = "";
+    this.stderr = "";
+    this.exitInfo = undefined;
+    const childEnvironment = {
+      ...allowlistedHostEnvironment(process.env),
+      PATH: joinPath(nodeModulesBin, process.env.PATH ?? ""),
+      PORT: String(config.apiPort),
+      PI_CLOUD_PUBLIC_BASE_URL: config.apiBaseUrl.toString(),
+      PI_CLOUD_DATABASE_PATH: config.databasePath,
+      PI_CLOUD_RUNTIME_WORKSPACE_ROOT: config.workspaceRoots,
+      PI_CLOUD_RUNTIME_AGENT_DIRECTORY: config.agentRoots,
+      PI_CLOUD_DISPATCHER_TOKEN: config.dispatcherToken,
+      PI_CLOUD_TASK_LEASE_PRIVATE_KEY: config.taskLeasePrivateKey,
+      PI_CLOUD_API_CREDENTIALS: config.apiCredentialsJson,
+      ...(config.hostedCredentialReferencesJson ? { PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES: config.hostedCredentialReferencesJson } : {}),
+      ...(config.hostedCredentialsJson ? { PI_CLOUD_HOSTED_CREDENTIALS: config.hostedCredentialsJson } : {}),
+    };
+    this.child = spawn(process.execPath, ["--input-type=module", "--eval", apiBootstrapSource()], {
+      cwd: process.cwd(),
+      env: childEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk); });
+    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk); });
+    this.exitPromise = new Promise((resolve) => {
+      this.child.once("exit", (code, signal) => {
+        this.exitInfo = { code, signal };
+        resolve(this.exitInfo);
+      });
+    });
+  }
+
+  async waitForHealth(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.exitInfo) throw new Error(`Dedicated API exited before becoming healthy: ${this.describeExit()}`);
+      try {
+        const response = await fetch(new URL("/health", this.config.apiBaseUrl));
+        if (response.ok) return;
+      } catch {
+        // Retry until the child either listens, exits, or the deadline expires.
+      }
+      await delay(250);
+    }
+    throw new Error(`Timed out waiting for dedicated API health: ${this.describeExit()}`);
+  }
+
+  describeExit() {
+    const info = this.exitInfo;
+    const summary = `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
+    const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
+    return output ? `${summary}\n${redact(output, this.secrets)}` : summary;
+  }
+
+  async stop() {
+    if (this.exitInfo) return this.exitInfo;
+    this.child.kill("SIGTERM");
+    try {
+      return await withTimeout(this.exitPromise, 10_000, "Timed out stopping dedicated API process");
+    } catch {
+      this.child.kill("SIGKILL");
+      return this.exitPromise;
+    }
+  }
+}
+
+/** Owns one hosted runner worker child and reports redacted exit details to the smoke flow. */
 class RunnerProcess {
   constructor(config, suffix) {
     this.secrets = config.secrets;
@@ -376,7 +559,7 @@ class RunnerProcess {
     this.stderr = "";
     this.exitInfo = undefined;
     const childEnvironment = {
-      ...process.env,
+      ...allowlistedHostEnvironment(process.env),
       PATH: joinPath(nodeModulesBin, process.env.PATH ?? ""),
       PI_CLOUD_HOSTED_DISPATCHER_URL: config.runnerDispatcherUrl.toString(),
       PI_CLOUD_HOSTED_DISPATCHER_TOKEN: config.dispatcherToken,
@@ -384,7 +567,6 @@ class RunnerProcess {
       PI_CLOUD_HOSTED_WORKSPACE_ROOTS: config.workspaceRoots,
       PI_CLOUD_HOSTED_SESSION_ROOTS: config.sessionRoots,
       PI_CLOUD_HOSTED_AGENT_ROOTS: config.agentRoots,
-      ...(config.hostedCredentialsJson ? { PI_CLOUD_HOSTED_CREDENTIALS: config.hostedCredentialsJson } : {}),
       ...(config.piExecutable ? { PI_CLOUD_PI_EXECUTABLE: config.piExecutable } : {}),
     };
     this.child = spawn(process.execPath, [runnerEntry], {
@@ -394,8 +576,8 @@ class RunnerProcess {
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => { this.stdout += chunk; });
-    this.child.stderr.on("data", (chunk) => { this.stderr += chunk; });
+    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk); });
+    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk); });
     this.exitPromise = new Promise((resolve) => {
       this.child.once("exit", (code, signal) => {
         this.exitInfo = { code, signal };
@@ -462,6 +644,7 @@ async function openWebSocket(url, token) {
   });
 }
 
+/** Sends and receives one public hosted RPC client connection with per-request sequencing. */
 class HostedClientConnection {
   constructor(socket, sessionId, secrets) {
     this.socket = socket;
@@ -547,7 +730,7 @@ class HostedClientConnection {
   }
 }
 
-async function promptAndWait(client, sessionId, prompt, timeoutMs) {
+async function promptAndWait(client, sessionId, prompt, expectedMarker, timeoutMs) {
   const requestId = `prompt-${randomUUID()}`;
   client.send({ type: "prompt", id: requestId, message: prompt });
   const deadline = Date.now() + timeoutMs;
@@ -569,7 +752,12 @@ async function promptAndWait(client, sessionId, prompt, timeoutMs) {
     }
     if (record.type === "agent_settled") sawSettled = true;
     if (record.type === "error") throw new Error(`Pi returned an error record: ${JSON.stringify(record)}`);
-    if (sawMessageEnd && sawSettled) return { messageText };
+    if (sawMessageEnd && sawSettled) {
+      if (!messageText.includes(expectedMarker)) {
+        throw new Error(`Prompt completed without the expected marker. Final message: ${messageText}`);
+      }
+      return { messageText };
+    }
   }
 
   throw new Error("Timed out waiting for a finalized assistant message and agent_settled");
@@ -606,6 +794,38 @@ async function getState(client, sessionId, expectedNative, timeoutMs) {
   throw new Error("Timed out waiting for get_state after reconnect");
 }
 
+async function getEntries(client, sessionId, initialPrompt, expectedMarker, timeoutMs) {
+  const requestId = `entries-${randomUUID()}`;
+  client.send({ type: "get_entries", id: requestId });
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const envelope = await client.next(Math.max(1, deadline - Date.now()));
+    if (envelope?.hostedSessionId !== sessionId) throw new Error("Received a hosted envelope for the wrong session");
+    const record = envelope.record;
+    if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === true) {
+      const serializedEntries = JSON.stringify(record.data?.entries ?? record.data ?? record);
+      if (!serializedEntries.includes(JSON.stringify(initialPrompt))) {
+        throw new Error("Reconnected get_entries did not contain the exact initial prompt");
+      }
+      if (!serializedContainsValue(serializedEntries, expectedMarker)) {
+        throw new Error("Reconnected get_entries did not contain the expected marker");
+      }
+      return { serializedEntries };
+    }
+    if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === false) {
+      throw new Error(`get_entries failed after reconnect: ${JSON.stringify(record)}`);
+    }
+    if (record?.type === "error") throw new Error(`Pi returned an error record after reconnect: ${JSON.stringify(record)}`);
+  }
+
+  throw new Error("Timed out waiting for get_entries after reconnect");
+}
+
+function serializedContainsValue(serialized, value) {
+  return serialized.includes(value) || serialized.includes(JSON.stringify(value));
+}
+
 function extractMessageText(record) {
   const content = Array.isArray(record?.message?.content) ? record.message.content : [];
   const text = content
@@ -640,10 +860,61 @@ function joinPath(prefix, existing) {
   return existing ? `${prefix}${delimiter}${existing}` : prefix;
 }
 
+async function reserveUnusedLoopbackPort() {
+  const server = createServer();
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : undefined;
+  await new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise(undefined)));
+  if (!port) throw new Error("Unable to reserve an unused loopback port");
+  return port;
+}
+
+function generateTaskLeasePrivateKey() {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  return privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+}
+
+function randomToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+function allowlistedHostEnvironment(environment) {
+  const allowedNames = [
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "NO_PROXY",
+    "PATH",
+    "SHELL",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USER",
+  ];
+  return Object.fromEntries(
+    allowedNames.flatMap((name) => environment[name] === undefined ? [] : [[name, environment[name]]]),
+  );
+}
+
 async function readIncomingMessage(stream) {
   let body = "";
   for await (const chunk of stream) body += chunk;
   return body || stream.statusMessage || "no response body";
+}
+
+function appendBoundedDiagnostic(current, chunk) {
+  const encoded = Buffer.from(current + String(chunk));
+  if (encoded.byteLength <= maxDiagnosticBytes) return encoded.toString("utf8");
+  let start = encoded.byteLength - maxDiagnosticBytes;
+  while (start < encoded.byteLength && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
 }
 
 function redact(text, secrets) {
@@ -651,7 +922,7 @@ function redact(text, secrets) {
 }
 
 function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
 async function withTimeout(promise, timeoutMs, message) {

@@ -35,7 +35,7 @@ HTTP handles create, list, get, start, stop, archive, and delete operations. Aut
 
 ## Runtime worker
 
-`packages/runner` opens one authorized workspace, resolves scoped credential references, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
+`packages/runner` opens one authorized workspace, receives only that workspace's API-resolved credentials in its claim, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
 
 The worker process is disposable. Workspace and native Pi session data persist independently. A replacement worker resumes the native session through Pi's CLI and RPC operations.
 

@@ -653,7 +653,7 @@ class HostedClientConnection {
     this.sessionId = sessionId;
     this.secrets = secrets;
     this.sequence = 0;
-    this.inboundSequence = undefined;
+    this.inboundSequence = 0;
     this.queue = [];
     this.waiters = [];
     this.closed = undefined;
@@ -671,7 +671,7 @@ class HostedClientConnection {
         if (!Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1) {
           throw new Error("Hosted client received an invalid envelope sequence");
         }
-        if (this.inboundSequence !== undefined && envelope.sequence !== this.inboundSequence + 1) {
+        if (envelope.sequence !== this.inboundSequence + 1) {
           throw new Error("Hosted client received a non-contiguous envelope sequence");
         }
         if (!envelope.record || typeof envelope.record !== "object") {

@@ -62,7 +62,9 @@ test("hosted worker checks out an absent repository and requests native state on
     },
     nativeSession: { kind: "new", sessionDirectory },
     piAgentDirectory,
-    credentialReferences: [],
+    credentialReferences: [
+      { name: "provider", reference: "vault://provider/key", environmentVariable: "ANTHROPIC_API_KEY" },
+    ],
     limits: {
       wallTimeSeconds: 10,
       idleTimeSeconds: 5,
@@ -78,7 +80,11 @@ test("hosted worker checks out an absent repository and requests native state on
   try {
     assert.equal(await runHostedRuntimeWorker({
       dispatcher: {
-        claim: async () => ({ launch, tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" } }),
+        claim: async () => ({
+          launch,
+          credentials: [{ reference: "vault://provider/key", value: "scoped-secret" }],
+          tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" },
+        }),
       },
       runnerId: "hosted-runner-1",
       authorizedRoots: { workspaceRoots: [join(root, "workspaces")], sessionRoots: [join(root, "sessions")], agentRoots: [join(root, "agent")] },
@@ -103,10 +109,11 @@ test("hosted worker checks out an absent repository and requests native state on
     }), true);
     assert.equal(checkoutCount, 1);
     const startup = socket.sent.find((value) => (value as { record?: { command?: string } }).record?.command === "get_state") as {
-      record: { id: string; data: { sessionId: string } };
+      record: { id: string; data: { sessionId: string; credentialPresent: boolean } };
     };
     assert.equal(startup.record.id, "pi-cloud-internal-startup-state");
     assert.equal(startup.record.data.sessionId, "native-1");
+    assert.equal(startup.record.data.credentialPresent, true);
     await fs.access(workspaceRoot);
     await fs.access(sessionDirectory);
   } finally {

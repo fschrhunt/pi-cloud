@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type { HostedRuntimeLaunch, PiRpcClientCommand, PiRpcRecord } from "@pi-cloud/contracts";
 import { StrictJsonlParser } from "./jsonl.js";
 import { nativeSessionDirectory, runtimeHomeDirectory } from "./pathAuthorization.js";
@@ -71,11 +72,15 @@ export class PiRpcSupervisor {
 
     const secrets = options.configuredSecrets ?? Object.values(options.credentialEnvironment ?? {});
     const runtimeHome = runtimeHomeDirectory(options.launch);
-    mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
+    const runtimeTemp = join(runtimeHome, "tmp");
+    mkdirSync(runtimeTemp, { recursive: true, mode: 0o700 });
     this.childEnvironment = {
       ...(options.environment ?? allowlistedProcessEnvironment(process.env)),
       ...(options.credentialEnvironment ?? {}),
       HOME: runtimeHome,
+      TEMP: runtimeTemp,
+      TMP: runtimeTemp,
+      TMPDIR: runtimeTemp,
       PI_CODING_AGENT_DIR: options.launch.piAgentDirectory,
     };
     this.stderr = new BoundedStderrDiagnostic(secrets, options.stderrMaxBytes ?? options.launch.limits.maxRecordBytes);

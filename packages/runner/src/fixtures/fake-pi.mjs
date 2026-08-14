@@ -49,7 +49,9 @@ process.stdin.on("data", (chunk) => {
       emit({ id: command.id, type: "response", command: "prompt", success: true });
       const text = command.message === "inspect-environment"
         ? String(process.env.PI_CLOUD_HOSTED_DISPATCHER_TOKEN ?? "not-inherited")
-        : String(command.message).includes("SMOKE_OK") ? "SMOKE_OK" : "fixture response";
+        : command.message === "inspect-provider"
+          ? process.env.ANTHROPIC_API_KEY ? "provider-present" : "provider-absent"
+          : String(command.message).includes("SMOKE_OK") ? "SMOKE_OK" : "fixture response";
       writeFileSync(entriesFile, JSON.stringify([
         { type: "message", id: "user-1", message: { role: "user", content: [{ type: "text", text: command.message }] } },
         { type: "message", id: "assistant-1", parentId: "user-1", message: { role: "assistant", content: [{ type: "text", text }] } },

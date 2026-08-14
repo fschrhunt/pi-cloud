@@ -46,6 +46,7 @@ test("API config accepts durable storage, identities, and Ed25519 lease authorit
         maxCumulativeBytes: 10_000_000,
       },
       hostedCredentialReferences: [],
+      hostedCredentialValues: {},
     },
   );
 });
@@ -67,6 +68,29 @@ test("API config accepts loopback and Docker-host HTTP URLs for local developmen
     PI_CLOUD_PUBLIC_BASE_URL: "http://host.docker.internal:3000",
   });
   assert.equal(dockerConfig.publicBaseUrl, "http://host.docker.internal:3000");
+});
+
+test("API config requires values for exactly the configured hosted credential references", () => {
+  const reference = [{ name: "provider", reference: "vault://provider/key", environmentVariable: "ANTHROPIC_API_KEY" }];
+  const base = {
+    PI_CLOUD_DISPATCHER_TOKEN: dispatcherToken,
+    PI_CLOUD_TASK_LEASE_PRIVATE_KEY: encodedPrivateKey,
+    PI_CLOUD_API_CREDENTIALS: JSON.stringify(apiCredentials),
+    PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES: JSON.stringify(reference),
+    ...hostedEnv,
+  };
+  assert.throws(() => readApiConfig(base), /has no value/);
+  assert.throws(() => readApiConfig({
+    ...base,
+    PI_CLOUD_HOSTED_CREDENTIALS: JSON.stringify({ "vault://other/key": "wrong" }),
+  }));
+  assert.deepEqual(
+    readApiConfig({
+      ...base,
+      PI_CLOUD_HOSTED_CREDENTIALS: JSON.stringify({ "vault://provider/key": "scoped-secret" }),
+    }).hostedCredentialValues,
+    { "vault://provider/key": "scoped-secret" },
+  );
 });
 
 test("API config rejects a non-local HTTP public base URL", () => {

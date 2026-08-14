@@ -1,7 +1,7 @@
 import { delimiter, resolve } from "node:path";
 import { z } from "zod";
 import { parseControlPlaneUrl } from "./config.js";
-import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker, type ResolvedHostedCredentials } from "./hostedRuntimeWorker.js";
+import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker } from "./hostedRuntimeWorker.js";
 
 const hostedWorkerConfigSchema = z.object({
   dispatcherUrl: z.string().min(1),
@@ -38,32 +38,10 @@ export async function runHostedRuntimeWorkerFromEnv(
       agentRoots: parseRoots(config.agentRoots),
     },
     piExecutable: config.piExecutable,
-    resolveCredentials: async (references) => resolveCredentialEnvironment(references, env),
     signal,
   });
 }
 
 function parseRoots(value: string): string[] {
   return value.split(delimiter).filter(Boolean).map((root) => resolve(root));
-}
-
-function resolveCredentialEnvironment(
-  references: readonly { reference: string; environmentVariable: string }[],
-  env: NodeJS.ProcessEnv,
-): ResolvedHostedCredentials {
-  const encoded = env.PI_CLOUD_HOSTED_CREDENTIALS;
-  delete env.PI_CLOUD_HOSTED_CREDENTIALS;
-  if (references.length === 0) return { environment: {}, secrets: [] };
-  if (!encoded) throw new Error("PI_CLOUD_HOSTED_CREDENTIALS is required by the claimed launch");
-
-  const values = z.record(z.string(), z.string().min(1)).parse(JSON.parse(encoded));
-  const environment: Record<string, string> = {};
-  for (const reference of references) {
-    const value = values[reference.reference];
-    if (!value) throw new Error(`Credential reference ${reference.reference} is unavailable`);
-    environment[reference.environmentVariable] = value;
-  }
-  const secrets = Object.values(values);
-  for (const key of Object.keys(values)) values[key] = "";
-  return { environment, secrets };
 }

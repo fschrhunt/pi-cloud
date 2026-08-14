@@ -228,7 +228,7 @@ function parseHostedCredentialReferences(value) {
 function parseCredentialReferenceNames(explicitValue, configuredReferences) {
   const names = explicitValue
     ? parseNameList(explicitValue, "PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES")
-    : configuredReferences.map((entry) => entry.name);
+    : [];
   const configuredNames = new Set(configuredReferences.map((entry) => entry.name));
   const seen = new Set();
   for (const name of names) {
@@ -804,14 +804,19 @@ async function getEntries(client, sessionId, initialPrompt, expectedMarker, time
     if (envelope?.hostedSessionId !== sessionId) throw new Error("Received a hosted envelope for the wrong session");
     const record = envelope.record;
     if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === true) {
-      const serializedEntries = JSON.stringify(record.data?.entries ?? record.data ?? record);
-      if (!serializedEntries.includes(JSON.stringify(initialPrompt))) {
-        throw new Error("Reconnected get_entries did not contain the exact initial prompt");
-      }
-      if (!serializedContainsValue(serializedEntries, expectedMarker)) {
-        throw new Error("Reconnected get_entries did not contain the expected marker");
-      }
-      return { serializedEntries };
+      const entries = record.data?.entries;
+      if (!Array.isArray(entries)) throw new Error("Reconnected get_entries returned no entry array");
+      const hasInitialPrompt = entries.some((entry) =>
+        entry?.type === "message" && entry.message?.role === "user" && sessionEntryText(entry) === initialPrompt,
+      );
+      if (!hasInitialPrompt) throw new Error("Reconnected get_entries did not contain the exact initial user prompt");
+      const hasAssistantMarker = entries.some((entry) =>
+        entry?.type === "message"
+        && entry.message?.role === "assistant"
+        && sessionEntryText(entry).includes(expectedMarker),
+      );
+      if (!hasAssistantMarker) throw new Error("Reconnected get_entries had no assistant entry with the expected marker");
+      return { entryCount: entries.length };
     }
     if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === false) {
       throw new Error(`get_entries failed after reconnect: ${JSON.stringify(record)}`);
@@ -822,8 +827,14 @@ async function getEntries(client, sessionId, initialPrompt, expectedMarker, time
   throw new Error("Timed out waiting for get_entries after reconnect");
 }
 
-function serializedContainsValue(serialized, value) {
-  return serialized.includes(value) || serialized.includes(JSON.stringify(value));
+function sessionEntryText(entry) {
+  const content = entry?.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
 }
 
 function extractMessageText(record) {

@@ -11,6 +11,7 @@ API:
 - `PI_CLOUD_RUNTIME_AGENT_DIRECTORY`
 - `PI_CLOUD_HOSTED_LAUNCH_LIMITS`
 - `PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES`
+- `PI_CLOUD_HOSTED_CREDENTIALS`
 - normal API auth, dispatcher, and lease keys
 
 Hosted runner:
@@ -21,7 +22,6 @@ Hosted runner:
 - `PI_CLOUD_HOSTED_WORKSPACE_ROOTS`
 - `PI_CLOUD_HOSTED_SESSION_ROOTS`
 - `PI_CLOUD_HOSTED_AGENT_ROOTS`
-- optional `PI_CLOUD_HOSTED_CREDENTIALS`
 - optional `PI_CLOUD_PI_EXECUTABLE`
 
 See [../.env.example](../.env.example) for a local single-operator example.
@@ -221,7 +221,9 @@ Other important failures:
 
 ## Local Compose worker
 
-The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`. Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
+The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`.
+
+The shared operator Pi agent directory is mounted read-only. Pi receives a writable `HOME` under its hosted session directory, so one repository cannot persist settings or extensions into the shared source used by later workspaces. Cleartext HTTP and WebSocket transport is accepted only for loopback and the Docker host alias; use HTTPS/WSS elsewhere.
 
 ## Smoke test
 

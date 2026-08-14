@@ -35,8 +35,8 @@ export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Pro
     fs.mkdir(sessionDirectory, { recursive: true }),
     fs.mkdir(runtimeHomeDirectory(launch), { recursive: true, mode: 0o700 }),
   ]);
-  await chownTree(storageRoot, identity.uid, identity.gid);
   await fs.chmod(storageRoot, 0o700);
+  await chownTree(storageRoot, identity.uid, identity.gid);
   return identity;
 }
 

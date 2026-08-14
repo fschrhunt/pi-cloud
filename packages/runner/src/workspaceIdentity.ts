@@ -33,7 +33,7 @@ export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Pro
   await Promise.all([
     fs.mkdir(launch.workspaceRoot, { recursive: true }),
     fs.mkdir(sessionDirectory, { recursive: true }),
-    fs.mkdir(runtimeHomeDirectory(launch), { recursive: true, mode: 0o700 }),
+    fs.mkdir(join(runtimeHomeDirectory(launch), "tmp"), { recursive: true, mode: 0o700 }),
   ]);
   await fs.chmod(storageRoot, 0o700);
   await chownTree(storageRoot, identity.uid, identity.gid);

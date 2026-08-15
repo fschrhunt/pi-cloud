@@ -11,6 +11,9 @@ for network in fc00::/7 fe80::/10; do
   ip6tables -A OUTPUT -m owner ! --uid-owner 0 -d "$network" -j REJECT
 done
 
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
 if [ -z "${PI_CLOUD_HOSTED_DISPATCHER_TOKEN:-}" ]; then
   exec node packages/runner/dist/runner.js
 fi

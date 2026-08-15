@@ -295,14 +295,30 @@ async function* eventStream(
       yield formatSse(event);
     }
     if (events.length === ControlPlane.eventBatchSize) {
-      events = controlPlane.listEvents(principal, runId, cursor);
+      try {
+        events = controlPlane.listEvents(principal, runId, cursor);
+      } catch (error: unknown) {
+        if (error instanceof ApiError && error.statusCode === 404) return;
+        throw error;
+      }
       continue;
     }
-    if (!follow || controlPlane.isRunTerminal(principal, runId)) return;
+    if (!follow) return;
+    try {
+      if (controlPlane.isRunTerminal(principal, runId)) return;
+    } catch (error: unknown) {
+      if (error instanceof ApiError && error.statusCode === 404) return;
+      throw error;
+    }
     await delay(15_000);
     if (disconnected()) return;
     yield `: heartbeat ${new Date().toISOString()}\n\n`;
-    events = controlPlane.listEvents(principal, runId, cursor);
+    try {
+      events = controlPlane.listEvents(principal, runId, cursor);
+    } catch (error: unknown) {
+      if (error instanceof ApiError && error.statusCode === 404) return;
+      throw error;
+    }
   }
 }
 

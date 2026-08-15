@@ -227,9 +227,27 @@ test("an unconnected runtime claim expires and can be restarted without leaving 
   assert.throws(() => controlPlane.authorizeRuntimeAssignment(session.id, claim.tunnel.token), /Unauthorized/);
 });
 
-test("a connected starting runtime is not expired while checkout heartbeats continue", () => {
+test("a consumed tunnel token without heartbeats expires after a failed upgrade", () => {
   let now = new Date("2026-01-01T00:00:00.000Z");
   const { controlPlane } = newControlPlane({}, () => now);
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-failed-upgrade",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-failed-upgrade");
+  const claim = controlPlane.claimHostedRuntime({ runnerId: "runner-failed-upgrade" });
+  assert.ok(claim);
+  controlPlane.authorizeRuntimeAssignment(session.id, claim.tunnel.token);
+
+  now = new Date("2026-01-01T00:01:01.000Z");
+  assert.equal(controlPlane.claimHostedRuntime({ runnerId: "runner-recovery" }), undefined);
+  assert.equal(controlPlane.getHostedSession(principal, session.id).state, "stopped");
+});
+
+test("a connected starting runtime is not expired while checkout heartbeats continue", () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { controlPlane, store } = newControlPlane({}, () => now);
   const workspace = controlPlane.createWorkspace(
     principal,
     { repositoryUrl: "https://github.com/pi-cloud/example", revision },
@@ -238,7 +256,9 @@ test("a connected starting runtime is not expired while checkout heartbeats cont
   const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-connected-starting");
   const claim = controlPlane.claimHostedRuntime({ runnerId: "runner-connected" });
   assert.ok(claim);
-  controlPlane.authorizeRuntimeAssignment(session.id, claim.tunnel.token);
+  const assignment = controlPlane.authorizeRuntimeAssignment(session.id, claim.tunnel.token);
+  now = new Date("2026-01-01T00:00:50.000Z");
+  store.touchAssignmentHeartbeat(assignment.assignmentId, now);
 
   now = new Date("2026-01-01T00:01:01.000Z");
   assert.equal(controlPlane.claimHostedRuntime({ runnerId: "runner-other" }), undefined);

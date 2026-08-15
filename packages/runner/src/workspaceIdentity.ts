@@ -36,9 +36,18 @@ export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Pro
     fs.mkdir(sessionDirectory, { recursive: true }),
     fs.mkdir(join(runtimeHomeDirectory(launch), "tmp"), { recursive: true, mode: 0o700 }),
   ]);
+  await applyWorkspaceOwnership(launch, identity);
+  return identity;
+}
+
+/** Reclaims files created by the trusted checkout without repeating process and collision checks. */
+export async function applyWorkspaceOwnership(
+  launch: HostedRuntimeLaunch,
+  identity: RuntimeProcessIdentity,
+): Promise<void> {
+  const storageRoot = dirname(launch.workspaceRoot);
   await fs.chmod(storageRoot, 0o700);
   await chownTree(storageRoot, identity.uid, identity.gid);
-  return identity;
 }
 
 function isDescendant(root: string, candidate: string): boolean {

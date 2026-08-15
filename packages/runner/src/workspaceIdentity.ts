@@ -29,6 +29,7 @@ export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Pro
   }
 
   const identity = workspaceProcessIdentity(launch.workspaceId);
+  await killWorkspaceProcesses(identity);
   await rejectIdentityCollision(dirname(storageRoot), basename(storageRoot), identity.uid);
   await Promise.all([
     fs.mkdir(launch.workspaceRoot, { recursive: true }),
@@ -51,6 +52,34 @@ async function rejectIdentityCollision(parent: string, workspaceDirectory: strin
     const stats = await fs.lstat(join(parent, entry.name));
     if (stats.uid === uid) throw new Error("Derived workspace process identity collides with an existing workspace");
   }
+}
+
+/** Kills detached descendants left by the same workspace UID before ownership changes or reuse. */
+export async function killWorkspaceProcesses(identity: RuntimeProcessIdentity): Promise<void> {
+  if (process.platform !== "linux" || process.getuid?.() !== 0) return;
+  for (let round = 0; round < 20; round += 1) {
+    const matching: number[] = [];
+    for (const entry of await fs.readdir("/proc")) {
+      if (!/^\d+$/u.test(entry)) continue;
+      try {
+        const status = await fs.readFile(join("/proc", entry, "status"), "utf8");
+        const uid = /^Uid:\s+(\d+)/mu.exec(status)?.[1];
+        if (uid !== undefined && Number(uid) === identity.uid) matching.push(Number(entry));
+      } catch {
+        // Processes may exit while /proc is scanned.
+      }
+    }
+    if (matching.length === 0) return;
+    for (const pid of matching) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // A process that already exited is clean.
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Workspace processes survived forced cleanup");
 }
 
 async function chownTree(path: string, uid: number, gid: number): Promise<void> {

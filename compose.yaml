@@ -25,7 +25,7 @@ services:
       - /tmp:rw,noexec,nosuid,size=256m
     volumes:
       - pi-cloud-workspaces:/var/lib/pi-cloud/workspaces
-      - pi-cloud-agent:/var/lib/pi-cloud/agent:ro
+      - "${PI_CLOUD_HOST_AGENT_DIRECTORY:-./data/pi-agent}:/var/lib/pi-cloud/agent:ro"
     extra_hosts:
       - host.docker.internal:host-gateway
     cap_drop:
@@ -34,6 +34,7 @@ services:
       - CHOWN
       - DAC_OVERRIDE
       - KILL
+      - NET_ADMIN
       - SETGID
       - SETUID
     security_opt:
@@ -45,4 +46,3 @@ services:
 
 volumes:
   pi-cloud-workspaces:
-  pi-cloud-agent:

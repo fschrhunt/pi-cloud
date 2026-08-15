@@ -885,8 +885,10 @@ function required(value, name) {
 
 function parseProjectTrust(value) {
   if (value === undefined || value === "untrusted") return "untrusted";
-  if (value === "trusted") return "trusted";
-  throw new Error("PI_CLOUD_SMOKE_PROJECT_TRUST must be trusted or untrusted");
+  if (value === "trusted") {
+    throw new Error("Trusted-project smoke requires the container runtime and is not supported by this host process");
+  }
+  throw new Error("PI_CLOUD_SMOKE_PROJECT_TRUST must be untrusted");
 }
 
 function joinPath(prefix, existing) {

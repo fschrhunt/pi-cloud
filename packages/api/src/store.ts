@@ -1217,18 +1217,27 @@ export class ControlPlaneStore {
     });
   }
 
-  /** Resolves the single active assignment authorized to open a hosted session's internal tunnel. */
+  /** Atomically consumes the assignment token that opens a hosted session's single internal tunnel. */
   authorizeRuntimeAssignment(sessionId: string, tokenDigestValue: string, now: Date): { assignmentId: string; session: HostedSession; workspace: Workspace } | undefined {
-    const row = this.database
-      .prepare(
-        "SELECT * FROM runtime_assignments WHERE hosted_session_id = ? AND token_digest = ? AND stopped_at IS NULL AND expires_at > ?",
-      )
-      .get(sessionId, tokenDigestValue, now.toISOString()) as RuntimeAssignmentRow | undefined;
-    if (!row) return undefined;
-    const session = this.requireHostedSessionInternal(sessionId);
-    if (session.state !== "starting") return undefined;
-    const workspace = this.requireWorkspaceInternal(session.workspaceId);
-    return { assignmentId: row.id, session, workspace };
+    return this.transaction(() => {
+      const session = this.requireHostedSessionInternal(sessionId);
+      if (session.state !== "starting") return undefined;
+      const timestamp = now.toISOString();
+      const consumed = this.database
+        .prepare(
+          `UPDATE runtime_assignments
+           SET last_heartbeat_at = ?
+           WHERE hosted_session_id = ? AND token_digest = ? AND stopped_at IS NULL
+             AND last_heartbeat_at IS NULL AND expires_at > ?`,
+        )
+        .run(timestamp, sessionId, tokenDigestValue, timestamp);
+      if (Number(consumed.changes) !== 1) return undefined;
+      const row = this.database
+        .prepare("SELECT * FROM runtime_assignments WHERE hosted_session_id = ? AND token_digest = ?")
+        .get(sessionId, tokenDigestValue) as RuntimeAssignmentRow;
+      const workspace = this.requireWorkspaceInternal(session.workspaceId);
+      return { assignmentId: row.id, session, workspace };
+    });
   }
 
   markHostedSessionRunning(sessionId: string, now: Date): void {

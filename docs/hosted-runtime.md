@@ -207,14 +207,16 @@ Stable policy close codes:
 
 - `4400` invalid JSON, schema, direction, or binary frame
 - `4404` cross-session envelope
-- `4409` sequence gap or duplicate attachment
-- `4410` runtime disconnected
+- `4408` duplicate runtime or client attachment
+- `4409` sequence gap
+- `4410` runtime disconnected or heartbeat expired
 - `4413` per-record or cumulative byte limit exceeded
 
 Other important failures:
 
 - missing credential values fail the worker before Pi starts;
 - repository or path mismatches fail the runtime attempt; unconnected assignment authority expires after 60 seconds;
+- connected workers send 15-second heartbeat controls, and the API stops a runtime after 60 seconds without authenticated activity;
 - a `resume` launch without the persistent repository fails closed;
 - API restarts drop live sockets, revoke stale runtime assignments, and stop affected sessions; after an explicit restart, a replacement worker resumes Pi before clients reconnect through Pi state;
 - `archive` requires the session to be stopped and its runtime tunnel to be fully closed first;

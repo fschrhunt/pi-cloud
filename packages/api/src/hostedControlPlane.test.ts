@@ -147,6 +147,7 @@ test("claiming a hosted runtime is atomic, mints a validated launch, and derives
 
   const authorized = controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token);
   assert.equal(authorized.session.id, session.id);
+  assert.throws(() => controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token), /Unauthorized/);
   assert.throws(() => controlPlane.authorizeRuntimeAssignment(session.id, "wrong-token"), /Unauthorized/);
 });
 

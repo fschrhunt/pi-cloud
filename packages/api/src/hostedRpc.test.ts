@@ -318,7 +318,7 @@ test("hosted RPC tunnel enforces strict sequence, byte, and session-scoping poli
       }),
     ),
   );
-  assert.equal(oversizedCode, 4413);
+  assert.equal(oversizedCode, 1009);
 
   await closeAll(runtime);
   await app.close();

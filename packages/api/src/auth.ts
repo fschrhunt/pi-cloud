@@ -36,9 +36,7 @@ export class Authenticator {
 export function hasBearerToken(authorization: string | undefined, expectedToken: string): boolean {
   const token = bearerToken(authorization);
   if (!token) return false;
-  const actual = Buffer.from(token);
-  const expected = Buffer.from(expectedToken);
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  return timingSafeEqual(hash(token), hash(expectedToken));
 }
 
 export function bearerToken(authorization: string | undefined): string | undefined {

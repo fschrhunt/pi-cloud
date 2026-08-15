@@ -38,7 +38,7 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
   const authenticator = new Authenticator(config.apiCredentials);
 
   await app.register(cors, { origin: false });
-  await app.register(websocket);
+  await app.register(websocket, { options: { maxPayload: config.hostedLaunchLimits.maxRecordBytes } });
   app.addHook("preClose", async () => hostedControlPlane.close());
   app.addHook("onClose", async () => controlPlane.close());
 

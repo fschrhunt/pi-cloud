@@ -10,6 +10,7 @@ import WebSocket from "ws";
 import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker, validateNativeSessionRecord } from "./hostedRuntimeWorker.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
+const exitFixture = fileURLToPath(new URL("./fixtures/exit-pi.mjs", import.meta.url));
 
 class FakeSocket extends EventEmitter {
   readyState: number = WebSocket.OPEN;
@@ -127,6 +128,37 @@ test("hosted worker checks out an absent repository and requests native state on
     assert.equal(startup.record.data.credentialPresent, true);
     await fs.access(workspaceRoot);
     await fs.access(sessionDirectory);
+
+    const failedSocket = new FakeSocket();
+    await assert.rejects(runHostedRuntimeWorker({
+      dispatcher: {
+        claim: async () => ({
+          launch,
+          credentials: [{ reference: "vault://provider/key", value: "scoped-secret" }],
+          tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" },
+        }),
+      },
+      runnerId: "hosted-runner-failure",
+      authorizedRoots: {
+        workspaceRoots: [join(root, "workspaces")],
+        sessionRoots: [join(root, "sessions")],
+        agentRoots: [join(root, "agent")],
+      },
+      piExecutable: exitFixture,
+      createWebSocket: () => failedSocket as unknown as WebSocket,
+      checkout: async () => ({
+        repositoryUrl: launch.repository.repositoryUrl,
+        revision: launch.repository.revision,
+        resolvedCommit: launch.repository.revision,
+        transport: "https",
+        credentialSource: "anonymous",
+        credentialScrubbed: true,
+        submodulesInitialized: false,
+        hooksDisabled: true,
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+      }),
+    }), /exited unexpectedly|startup/i);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

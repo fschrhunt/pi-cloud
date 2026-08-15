@@ -177,7 +177,11 @@ export class HostedRpcRouter {
       return;
     }
     const attachedRuntime = this.runtimes.get(sessionId);
-    if (!attachedRuntime || attachedRuntime.client) {
+    if (!attachedRuntime) {
+      closeIfOpen(socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime disconnected before client attachment");
+      return;
+    }
+    if (attachedRuntime.client) {
       closeIfOpen(socket, hostedPolicyCloseCodes.duplicateClient, "hosted session already has an active client");
       return;
     }

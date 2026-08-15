@@ -134,10 +134,13 @@ export class ControlPlane {
     const now = this.clock();
     let claims;
     try {
+      const leaseId = decodeLeaseId(token);
+      const expectedAudience = this.store.getLeaseAudience(leaseId);
+      if (!expectedAudience) throw new Error();
       claims = verifyTaskLease(token, {
         publicKey: this.publicKey,
         issuer: this.config.taskLeaseIssuer,
-        audience: decodeLeaseAudience(token),
+        audience: expectedAudience,
         now,
       });
     } catch {
@@ -177,15 +180,15 @@ export class ControlPlane {
   }
 }
 
-function decodeLeaseAudience(token: string): string {
+function decodeLeaseId(token: string): string {
   try {
     const payload = token.split(".")[0];
     if (!payload) throw new Error();
     const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
-    if (typeof decoded !== "object" || decoded === null || !("audience" in decoded) || typeof decoded.audience !== "string") {
+    if (typeof decoded !== "object" || decoded === null || !("leaseId" in decoded) || typeof decoded.leaseId !== "string") {
       throw new Error();
     }
-    return decoded.audience;
+    return z.uuid().parse(decoded.leaseId);
   } catch {
     throw conflict("lease_rejected", "Lease is stale, invalid, or already redeemed");
   }

@@ -599,6 +599,11 @@ export class ControlPlaneStore {
     });
   }
 
+  getLeaseAudience(leaseId: string): string | undefined {
+    const row = this.database.prepare("SELECT audience FROM leases WHERE lease_id = ?").get(leaseId) as { audience: string } | undefined;
+    return row?.audience;
+  }
+
   redeemLease(
     tokenDigest: string,
     claims: { leaseId: string; taskId: string; audience: string },
@@ -1185,6 +1190,7 @@ export class ControlPlaneStore {
            JOIN hosted_sessions ON hosted_sessions.id = runtime_assignments.hosted_session_id
            WHERE runtime_assignments.stopped_at IS NULL
              AND runtime_assignments.expires_at <= ?
+             AND runtime_assignments.last_heartbeat_at IS NULL
              AND hosted_sessions.state = 'starting'`,
         )
         .all(timestamp) as unknown as Array<{ id: string; hosted_session_id: string }>;

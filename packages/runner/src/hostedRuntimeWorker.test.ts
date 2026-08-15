@@ -87,6 +87,7 @@ test("hosted worker checks out an absent repository and requests native state on
   }), /symbolic link/);
 
   const socket = new FakeSocket();
+  const startupOrder: string[] = [];
   let checkoutCount = 0;
 
   try {
@@ -101,8 +102,12 @@ test("hosted worker checks out an absent repository and requests native state on
       runnerId: "hosted-runner-1",
       authorizedRoots: { workspaceRoots: [join(root, "workspaces")], sessionRoots: [join(root, "sessions")], agentRoots: [join(root, "agent")] },
       piExecutable: fixture,
-      createWebSocket: () => socket as unknown as WebSocket,
+      createWebSocket: () => {
+        startupOrder.push("tunnel");
+        return socket as unknown as WebSocket;
+      },
       checkout: async () => {
+        startupOrder.push("checkout");
         checkoutCount += 1;
         await fs.mkdir(workspaceRoot, { recursive: true });
         return {
@@ -120,6 +125,7 @@ test("hosted worker checks out an absent repository and requests native state on
       },
     }), true);
     assert.equal(checkoutCount, 1);
+    assert.deepEqual(startupOrder, ["tunnel", "checkout"]);
     const startup = socket.sent.find((value) => (value as { record?: { command?: string } }).record?.command === "get_state") as {
       record: { id: string; data: { sessionId: string; credentialPresent: boolean } };
     };

@@ -20,7 +20,12 @@ import {
   type HostedRuntimeAuthorizedRoots,
 } from "./pathAuthorization.js";
 import { PiRpcSupervisor } from "./piRpcSupervisor.js";
-import { killWorkspaceProcesses, prepareIsolatedWorkspace, type RuntimeProcessIdentity } from "./workspaceIdentity.js";
+import {
+  applyWorkspaceOwnership,
+  killWorkspaceProcesses,
+  prepareIsolatedWorkspace,
+  type RuntimeProcessIdentity,
+} from "./workspaceIdentity.js";
 
 const execFileAsync = promisify(execFile);
 const stopControlSchema = z
@@ -88,8 +93,6 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   try {
     await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
     if (options.processIsolation === "workspace_uid") processIdentity = await prepareIsolatedWorkspace(launch);
-    await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity);
-    if (processIdentity) await prepareIsolatedWorkspace(launch);
   } catch (error: unknown) {
     scrubResolvedCredentials(credentials);
     throw error;
@@ -103,18 +106,72 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
     scrubResolvedCredentials(credentials);
     throw error;
   }
+
   let outboundSequence = 0;
   let outboundCumulativeBytes = 0;
   let inboundCumulativeBytes = 0;
   let lastInboundSequence = 0;
   let stopRequested = false;
+  let supervisor: PiRpcSupervisor | undefined;
+  const pendingMessages: Array<{ data: RawData; isBinary: boolean }> = [];
+  let resolveTunnel!: () => void;
+  let rejectTunnel!: (error: Error) => void;
+  const tunnelFinished = new Promise<void>((resolve, reject) => {
+    resolveTunnel = resolve;
+    rejectTunnel = reject;
+  });
+  const handleTunnelMessage = (data: RawData, isBinary: boolean) => {
+    if (!supervisor) {
+      pendingMessages.push({ data, isBinary });
+      return;
+    }
+    if (isBinary) {
+      rejectTunnel(new Error("Hosted runtime tunnel does not accept binary messages"));
+      return;
+    }
+    try {
+      const raw = rawDataToBuffer(data);
+      if (raw.byteLength > launch.limits.maxRecordBytes) throw new Error("Tunnel record exceeds maxRecordBytes");
+      const value = JSON.parse(raw.toString("utf8")) as unknown;
+      const stop = stopControlSchema.safeParse(value);
+      if (stop.success) {
+        stopRequested = true;
+        void supervisor.cancel().then(resolveTunnel, rejectTunnel);
+        return;
+      }
+      const bounded = parseBoundedHostedRpcClientEnvelope(value, {
+        maxRecordBytes: launch.limits.maxRecordBytes,
+        maxCumulativeBytes: launch.limits.maxCumulativeBytes,
+        cumulativeBytes: inboundCumulativeBytes,
+      });
+      inboundCumulativeBytes = bounded.cumulativeBytes;
+      if (bounded.envelope.hostedSessionId !== launch.hostedSessionId) {
+        throw new Error("RPC envelope is for a different hosted session");
+      }
+      if (bounded.envelope.sequence !== lastInboundSequence + 1) {
+        throw new Error("RPC envelope sequence is not contiguous");
+      }
+      lastInboundSequence = bounded.envelope.sequence;
+      supervisor.send(bounded.envelope.record);
+    } catch (error: unknown) {
+      rejectTunnel(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+  socket.on("message", handleTunnelMessage);
+  socket.once("error", (error) => rejectTunnel(error));
+  socket.once("close", () => {
+    if (!stopRequested) rejectTunnel(new Error("Hosted runtime tunnel closed unexpectedly"));
+  });
+  void tunnelFinished.catch(() => undefined);
+
   const heartbeatTimer = setInterval(() => {
     if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "pi_cloud_runtime_heartbeat" }));
   }, 15_000);
   heartbeatTimer.unref();
 
-  let supervisor: PiRpcSupervisor;
   try {
+    const checkedOut = await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity);
+    if (processIdentity && checkedOut) await applyWorkspaceOwnership(launch, processIdentity);
     supervisor = new PiRpcSupervisor({
       launch,
       piExecutable: options.piExecutable,
@@ -150,62 +207,21 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
       },
     });
   } catch (error: unknown) {
+    clearInterval(heartbeatTimer);
     scrubResolvedCredentials(credentials);
+    if (processIdentity) await killWorkspaceProcesses(processIdentity);
     if (socket.readyState === WebSocket.OPEN) socket.close(1011, "runtime startup failed");
     throw error;
   }
 
+  for (const pending of pendingMessages.splice(0)) handleTunnelMessage(pending.data, pending.isBinary);
+
   const abortRuntime = () => {
     stopRequested = true;
-    void supervisor.cancel();
+    void supervisor?.cancel();
   };
   options.signal?.addEventListener("abort", abortRuntime, { once: true });
   if (options.signal?.aborted) abortRuntime();
-
-  const tunnelFinished = new Promise<void>((resolve, reject) => {
-    socket.on("message", (data, isBinary) => {
-      if (isBinary) {
-        reject(new Error("Hosted runtime tunnel does not accept binary messages"));
-        return;
-      }
-      try {
-        const raw = rawDataToBuffer(data);
-        if (raw.byteLength > launch.limits.maxRecordBytes) throw new Error("Tunnel record exceeds maxRecordBytes");
-        inboundCumulativeBytes += raw.byteLength;
-        if (inboundCumulativeBytes > launch.limits.maxCumulativeBytes) {
-          throw new Error("Tunnel records exceed maxCumulativeBytes");
-        }
-        const value = JSON.parse(raw.toString("utf8")) as unknown;
-        const stop = stopControlSchema.safeParse(value);
-        if (stop.success) {
-          stopRequested = true;
-          void supervisor.cancel().then(resolve, reject);
-          return;
-        }
-        const bounded = parseBoundedHostedRpcClientEnvelope(value, {
-          maxRecordBytes: launch.limits.maxRecordBytes,
-          maxCumulativeBytes: launch.limits.maxCumulativeBytes,
-          cumulativeBytes: 0,
-        });
-        if (bounded.envelope.hostedSessionId !== launch.hostedSessionId) {
-          throw new Error("RPC envelope is for a different hosted session");
-        }
-        if (bounded.envelope.sequence !== lastInboundSequence + 1) {
-          throw new Error("RPC envelope sequence is not contiguous");
-        }
-        lastInboundSequence = bounded.envelope.sequence;
-        supervisor.send(bounded.envelope.record);
-      } catch (error: unknown) {
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-    socket.once("error", reject);
-    socket.once("close", () => {
-      if (!stopRequested) reject(new Error("Hosted runtime tunnel closed unexpectedly"));
-    });
-  });
-
-  void tunnelFinished.catch(() => undefined);
 
   try {
     await supervisor.started;
@@ -237,7 +253,7 @@ async function materializeRepository(
   launch: HostedRuntimeLaunch,
   checkout: typeof checkoutExactRevision,
   processIdentity?: RuntimeProcessIdentity,
-): Promise<void> {
+): Promise<boolean> {
   const gitDirectory = `${launch.workspaceRoot}/.git`;
   try {
     const stats = await fs.stat(gitDirectory);
@@ -259,7 +275,7 @@ async function materializeRepository(
     if (new URL(remoteUrl.trim()).toString() !== launch.repository.repositoryUrl) {
       throw new Error("Persistent workspace repository does not match hosted runtime launch");
     }
-    return;
+    return false;
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
@@ -274,6 +290,7 @@ async function materializeRepository(
     source: { kind: "https-url", repositoryUrl: launch.repository.repositoryUrl },
     scratchRoot: dirname(launch.workspaceRoot),
   });
+  return true;
 }
 
 function isolatedGitEnvironment(launch: HostedRuntimeLaunch): NodeJS.ProcessEnv {

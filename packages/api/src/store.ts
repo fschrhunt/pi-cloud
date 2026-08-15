@@ -1182,6 +1182,7 @@ export class ControlPlaneStore {
   ): { session: HostedSession; workspace: Workspace } | undefined {
     const timestamp = now.toISOString();
     const expiresAt = new Date(now.getTime() + assignmentTtlSeconds * 1_000).toISOString();
+    const staleHeartbeatAt = new Date(now.getTime() - assignmentTtlSeconds * 1_000).toISOString();
     return this.transaction(() => {
       const expired = this.database
         .prepare(
@@ -1190,10 +1191,10 @@ export class ControlPlaneStore {
            JOIN hosted_sessions ON hosted_sessions.id = runtime_assignments.hosted_session_id
            WHERE runtime_assignments.stopped_at IS NULL
              AND runtime_assignments.expires_at <= ?
-             AND runtime_assignments.last_heartbeat_at IS NULL
+             AND (runtime_assignments.last_heartbeat_at IS NULL OR runtime_assignments.last_heartbeat_at <= ?)
              AND hosted_sessions.state = 'starting'`,
         )
-        .all(timestamp) as unknown as Array<{ id: string; hosted_session_id: string }>;
+        .all(timestamp, staleHeartbeatAt) as unknown as Array<{ id: string; hosted_session_id: string }>;
       for (const assignment of expired) {
         this.database.prepare("UPDATE runtime_assignments SET stopped_at = ? WHERE id = ?").run(timestamp, assignment.id);
         this.database

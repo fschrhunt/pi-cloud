@@ -226,9 +226,16 @@ Other important failures:
 
 The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`.
 
-Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. The shared operator Pi agent directory is mounted read-only.
+Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. Set `PI_CLOUD_HOST_AGENT_DIRECTORY` to a populated operator Pi directory, which Compose bind-mounts read-only. A local copy can be initialized with:
 
-The trusted root supervisor keeps dispatcher authority and the full workspace volume. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives writable `HOME`, `TMPDIR`, `TMP`, and `TEMP` directories under its own hosted session directory.
+```bash
+mkdir -p data/pi-agent
+cp -R "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/." data/pi-agent/
+```
+
+The default bind source is `./data/pi-agent`, so a fresh deployment must run this initialization or point at an existing directory before starting the worker.
+
+The trusted root supervisor keeps dispatcher authority and the full workspace volume. Its firewall permits public Git/provider egress but rejects host, link-local, carrier-grade NAT, and RFC1918 destinations for every non-root Pi UID. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives writable `HOME`, `TMPDIR`, `TMP`, and `TEMP` directories under its own hosted session directory.
 
 Compose retains workspace data until the operator explicitly removes the local provider volume. After deleting or archiving any metadata that must be retained, run `docker compose down --volumes` to remove all local checkouts and native session files. Per-workspace physical deletion is not part of this M2 Docker provider.
 
@@ -236,4 +243,4 @@ Cleartext HTTP and WebSocket transport is accepted only for loopback and the Doc
 
 ## Smoke test
 
-`npm run smoke:hosted` starts a dedicated temporary API and exercises the public flow with a real built runner and Pi executable. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.
+`npm run smoke:hosted` loads `.env` when present, starts a dedicated temporary API, and exercises the public flow with a real built runner and Pi executable. Host smoke runs intentionally reject `trusted` project mode because that mode requires the container isolation boundary. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.

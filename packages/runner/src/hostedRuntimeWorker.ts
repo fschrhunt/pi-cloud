@@ -294,7 +294,7 @@ async function materializeRepository(
     revision: launch.repository.revision,
     source: { kind: "https-url", repositoryUrl: launch.repository.repositoryUrl },
     scratchRoot: dirname(launch.workspaceRoot),
-  });
+  }, { processIdentity });
   return true;
 }
 

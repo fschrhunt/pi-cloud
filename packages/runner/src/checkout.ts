@@ -41,10 +41,14 @@ const checkoutInputSchema = z.object({
 });
 
 export type CheckoutExactRevisionInput = z.input<typeof checkoutInputSchema>;
+export type CheckoutExecutionOptions = { processIdentity?: { uid: number; gid: number } };
 export type CheckoutSource = z.infer<typeof checkoutSourceSchema>;
 
 /** Checks out one exact revision into a clean workspace without hooks, helpers, or submodules. */
-export async function checkoutExactRevision(input: CheckoutExactRevisionInput): Promise<CheckoutProvenance> {
+export async function checkoutExactRevision(
+  input: CheckoutExactRevisionInput,
+  options: CheckoutExecutionOptions = {},
+): Promise<CheckoutProvenance> {
   const parsed = checkoutInputSchema.parse(input);
   const revision = parsed.revision.toLowerCase();
   const checkoutPath = resolve(parsed.checkoutPath);
@@ -56,10 +60,12 @@ export async function checkoutExactRevision(input: CheckoutExactRevisionInput): 
     repositoryUrl: source.repositoryUrl,
     credentials: source.kind === "https-url" ? source.credentials : undefined,
     allowFileProtocol: source.kind === "local-fixture",
+    processIdentity: options.processIdentity,
   });
 
   try {
     await createCleanCheckoutDirectory(checkoutPath);
+    if (options.processIdentity) await applyProcessIdentity(checkoutPath, options.processIdentity);
     await runGit(parsed.gitBinary, ["init", checkoutPath], gitEnvironment);
     await runGit(parsed.gitBinary, ["-C", checkoutPath, "remote", "add", "origin", source.fetchTarget], gitEnvironment);
     await runGit(
@@ -149,6 +155,7 @@ type NormalizedCheckoutSource =
 type GitEnvironment = {
   env: NodeJS.ProcessEnv;
   allowFileProtocol: boolean;
+  processIdentity?: { uid: number; gid: number };
   scrub: () => Promise<void>;
 };
 
@@ -157,6 +164,7 @@ async function createIsolatedGitEnvironment(input: {
   repositoryUrl: string;
   credentials?: { repositoryUrl: string; username: string; password: string };
   allowFileProtocol: boolean;
+  processIdentity?: { uid: number; gid: number };
 }): Promise<GitEnvironment> {
   await fs.mkdir(input.scratchRoot, { recursive: true });
   const root = await fs.mkdtemp(join(input.scratchRoot, "pi-cloud-git-"));
@@ -190,10 +198,12 @@ async function createIsolatedGitEnvironment(input: {
     env.GIT_ASKPASS = askPass.scriptPath;
     env.PI_CLOUD_ASKPASS_SECRET = askPass.secretPath;
   }
+  if (input.processIdentity) await applyProcessIdentity(root, input.processIdentity);
 
   return {
     env,
     allowFileProtocol: input.allowFileProtocol,
+    processIdentity: input.processIdentity,
     scrub: async () => {
       await askPass?.scrub();
       await fs.rm(root, { recursive: true, force: true });
@@ -226,6 +236,7 @@ async function runGit(gitBinary: string, args: string[], environment: GitEnviron
     shell: false,
     timeout: gitCommandTimeoutMs,
     maxBuffer: 10 * 1024 * 1024,
+    ...(environment.processIdentity ?? {}),
   });
 }
 
@@ -235,6 +246,7 @@ async function gitOutput(gitBinary: string, args: string[], environment: GitEnvi
     shell: false,
     timeout: gitCommandTimeoutMs,
     maxBuffer: 10 * 1024 * 1024,
+    ...(environment.processIdentity ?? {}),
   });
   return stdout.trim();
 }
@@ -266,6 +278,14 @@ function gitArgs(args: string[], environment: GitEnvironment): string[] {
     "http.followRedirects=false",
   ];
   return base.concat(args);
+}
+
+async function applyProcessIdentity(path: string, identity: { uid: number; gid: number }): Promise<void> {
+  const stats = await fs.lstat(path);
+  if (stats.isDirectory() && !stats.isSymbolicLink()) {
+    for (const entry of await fs.readdir(path)) await applyProcessIdentity(join(path, entry), identity);
+  }
+  await fs.lchown(path, identity.uid, identity.gid);
 }
 
 async function createCleanCheckoutDirectory(checkoutPath: string): Promise<void> {

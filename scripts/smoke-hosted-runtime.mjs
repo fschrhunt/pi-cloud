@@ -6,7 +6,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -31,6 +31,7 @@ async function main() {
 
   try {
     await assertBuiltRuntime();
+    buildSmokeRunnerImage(config);
     assertPiExecutable(config.piExecutable);
     await ensureRuntimeRoots(config);
 
@@ -48,6 +49,7 @@ async function main() {
     const initialNative = await waitForNativeSession(config, session.id, 120_000, firstRunner);
     await assertPathExists(expectedWorkspaceRoot, "workspace root");
     await assertPathExists(initialNative.nativeSessionFile, "native session file");
+    assertRepositoryCheckout(config, expectedWorkspaceRoot);
 
     const firstClient = await openHostedClient(config, session.id);
     clients.push(firstClient);
@@ -112,6 +114,7 @@ async function main() {
     for (const client of clients) await client.close().catch(() => undefined);
     for (const runner of runners) await runner.stop().catch(() => undefined);
     await api?.stop().catch(() => undefined);
+    await cleanupSmokeCompose(config).catch(() => undefined);
     await rm(config.controlPlaneRoot, { recursive: true, force: true });
   }
 
@@ -138,6 +141,11 @@ async function readConfig(env) {
   try {
     const apiPort = await reserveUnusedLoopbackPort();
     const apiBaseUrl = parseUrl(`http://127.0.0.1:${apiPort}`, "generated API base URL");
+    const runnerDispatcherUrl = parseUrl(`http://host.docker.internal:${apiPort}`, "container API base URL");
+    const operatorAgentDirectory = resolve(
+      env.PI_CLOUD_SMOKE_AGENT_DIRECTORY ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+    );
+    await assertPathExists(operatorAgentDirectory, "operator Pi agent directory");
     const dispatcherToken = randomToken();
     const userToken = randomToken();
     const taskLeasePrivateKey = generateTaskLeasePrivateKey();
@@ -160,13 +168,15 @@ async function readConfig(env) {
       dispatcherToken,
       taskLeasePrivateKey,
       apiCredentialsJson,
-      runnerDispatcherUrl: apiBaseUrl,
+      runnerDispatcherUrl,
       runnerIdBase: `smoke-hosted-${process.pid}-${randomUUID()}`,
+      composeProject: `pi-cloud-smoke-${process.pid}`,
       controlPlaneRoot,
       databasePath: join(controlPlaneRoot, "control-plane.sqlite"),
       workspaceRoots: join(controlPlaneRoot, "workspaces"),
       sessionRoots: join(controlPlaneRoot, "workspaces"),
-      agentRoots: join(controlPlaneRoot, "agent"),
+      agentRoots: "/var/lib/pi-cloud/agent",
+      operatorAgentDirectory,
       hostedCredentialReferencesJson,
       hostedCredentialsJson: hostedCredentials.json,
       hostedCredentialValues: hostedCredentials.secrets,
@@ -303,6 +313,8 @@ function parseHostedCredentialValues(value, references) {
 }
 
 async function assertBuiltRuntime() {
+  const compose = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 15_000 });
+  if (compose.status !== 0) throw new Error("docker compose is required for isolated hosted smoke workers");
   await Promise.all([
     assertPathExists(apiAppEntry, "built API app entrypoint"),
     assertPathExists(apiConfigEntry, "built API config entrypoint"),
@@ -311,7 +323,7 @@ async function assertBuiltRuntime() {
 }
 
 async function ensureRuntimeRoots(config) {
-  const roots = [config.workspaceRoots, config.sessionRoots, config.agentRoots]
+  const roots = [config.workspaceRoots, config.sessionRoots]
     .flatMap((value) => value.split(delimiter))
     .filter(Boolean);
   try {
@@ -323,7 +335,18 @@ async function ensureRuntimeRoots(config) {
   }
 }
 
+function buildSmokeRunnerImage(config) {
+  const result = spawnSync("docker", ["compose", "--project-name", config.composeProject, "build", "hosted-runner"], {
+    cwd: process.cwd(),
+    env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
+    encoding: "utf8",
+    timeout: 240_000,
+  });
+  if (result.status !== 0) throw new Error(`Unable to build isolated smoke runner image: ${result.stderr.trim()}`);
+}
+
 function assertPiExecutable(piExecutable) {
+  if (!piExecutable.startsWith("/")) return;
   const result = spawnSync(piExecutable, ["--help"], { encoding: "utf8", timeout: 15_000 });
   if (result.error?.code === "ENOENT") {
     throw new Error(`Pi executable not found on PATH: ${piExecutable}. Install Pi or set PI_CLOUD_PI_EXECUTABLE.`);
@@ -331,6 +354,29 @@ function assertPiExecutable(piExecutable) {
   if (result.error) {
     throw new Error(`Failed to invoke ${piExecutable}: ${result.error.message}`);
   }
+}
+
+function assertRepositoryCheckout(config, workspaceRoot) {
+  const revision = spawnSync("git", ["-C", workspaceRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 30_000 });
+  const remote = spawnSync("git", ["-C", workspaceRoot, "remote", "get-url", "origin"], { encoding: "utf8", timeout: 30_000 });
+  if (revision.status !== 0 || revision.stdout.trim().toLowerCase() !== config.revision.toLowerCase()) {
+    throw new Error("Smoke workspace did not materialize the requested revision");
+  }
+  if (remote.status !== 0 || new URL(remote.stdout.trim()).toString() !== new URL(config.repositoryUrl).toString()) {
+    throw new Error("Smoke workspace did not materialize the requested repository origin");
+  }
+}
+
+async function cleanupSmokeCompose(config) {
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn("docker", ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"], {
+      cwd: process.cwd(),
+      env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
+      stdio: "ignore",
+    });
+    child.once("exit", (code) => code === 0 ? resolvePromise(undefined) : reject(new Error("Unable to clean smoke Compose project")));
+    child.once("error", reject);
+  });
 }
 
 async function createWorkspace(config) {
@@ -491,7 +537,7 @@ class ApiProcess {
       ...allowlistedHostEnvironment(process.env),
       PATH: joinPath(nodeModulesBin, process.env.PATH ?? ""),
       PORT: String(config.apiPort),
-      PI_CLOUD_PUBLIC_BASE_URL: config.apiBaseUrl.toString(),
+      PI_CLOUD_PUBLIC_BASE_URL: config.runnerDispatcherUrl.toString(),
       PI_CLOUD_DATABASE_PATH: config.databasePath,
       PI_CLOUD_RUNTIME_WORKSPACE_ROOT: config.workspaceRoots,
       PI_CLOUD_RUNTIME_AGENT_DIRECTORY: config.agentRoots,
@@ -561,17 +607,42 @@ class RunnerProcess {
     this.exitInfo = undefined;
     const childEnvironment = {
       ...allowlistedHostEnvironment(process.env),
-      PATH: joinPath(nodeModulesBin, process.env.PATH ?? ""),
+      PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory,
       PI_CLOUD_HOSTED_DISPATCHER_URL: config.runnerDispatcherUrl.toString(),
       PI_CLOUD_HOSTED_DISPATCHER_TOKEN: config.dispatcherToken,
       PI_CLOUD_RUNNER_ID: `${config.runnerIdBase}-${suffix}`,
       PI_CLOUD_HOSTED_WORKSPACE_ROOTS: config.workspaceRoots,
       PI_CLOUD_HOSTED_SESSION_ROOTS: config.sessionRoots,
       PI_CLOUD_HOSTED_AGENT_ROOTS: config.agentRoots,
-      PI_CLOUD_HOSTED_PROCESS_ISOLATION: "inherit",
-      ...(config.piExecutable ? { PI_CLOUD_PI_EXECUTABLE: config.piExecutable } : {}),
+      PI_CLOUD_HOSTED_PROCESS_ISOLATION: "workspace_uid",
+      PI_CLOUD_PI_EXECUTABLE: config.piExecutable,
     };
-    this.child = spawn(process.execPath, [runnerEntry], {
+    const environmentNames = [
+      "PI_CLOUD_HOSTED_DISPATCHER_URL",
+      "PI_CLOUD_HOSTED_DISPATCHER_TOKEN",
+      "PI_CLOUD_RUNNER_ID",
+      "PI_CLOUD_HOSTED_WORKSPACE_ROOTS",
+      "PI_CLOUD_HOSTED_SESSION_ROOTS",
+      "PI_CLOUD_HOSTED_AGENT_ROOTS",
+      "PI_CLOUD_HOSTED_PROCESS_ISOLATION",
+      "PI_CLOUD_PI_EXECUTABLE",
+    ];
+    const args = [
+      "compose",
+      "--project-name",
+      config.composeProject,
+      "run",
+      "--rm",
+      "--no-deps",
+      "--volume",
+      `${config.controlPlaneRoot}:${config.controlPlaneRoot}`,
+      ...(config.piExecutable.startsWith("/") ? ["--volume", `${config.piExecutable}:${config.piExecutable}:ro`] : []),
+      ...environmentNames.flatMap((name) => ["--env", name]),
+      "hosted-runner",
+      "node",
+      "packages/runner/dist/runner.js",
+    ];
+    this.child = spawn("docker", args, {
       cwd: process.cwd(),
       env: childEnvironment,
       stdio: ["ignore", "pipe", "pipe"],

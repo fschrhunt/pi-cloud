@@ -126,10 +126,11 @@ Every WebSocket text frame is one complete JSON object:
 }
 ```
 
-- `direction` is `client_to_pi` on the public socket and `pi_to_client` on the runtime tunnel.
-- `sequence` is strictly contiguous per channel.
-- binary frames are rejected.
-- public and internal transports preserve Pi RPC records unchanged apart from re-sequencing.
+- a public client sends `client_to_pi` and receives `pi_to_client`;
+- a runtime tunnel receives `client_to_pi` and sends `pi_to_client`;
+- `sequence` is strictly contiguous for each sender connection;
+- binary frames are rejected;
+- native Pi RPC record structure is preserved, but configured secret values are replaced by `[REDACTED]` before any `pi_to_client` envelope crosses the runtime boundary.
 
 ## Supported client commands
 
@@ -243,4 +244,4 @@ Cleartext HTTP and WebSocket transport is accepted only for loopback and the Doc
 
 ## Smoke test
 
-`npm run smoke:hosted` loads `.env` when present, starts a dedicated temporary API, and exercises the public flow with a real built runner and Pi executable. Host smoke runs intentionally reject `trusted` project mode because that mode requires the container isolation boundary. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.
+`npm run smoke:hosted` loads `.env` when present, starts a dedicated temporary API, builds the runner image, and runs each smoke worker inside the same container isolation boundary as Compose. Set `PI_CLOUD_SMOKE_AGENT_DIRECTORY` when the operator Pi resources are not under `PI_CODING_AGENT_DIR` or `~/.pi/agent`. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.

@@ -123,7 +123,7 @@ Run the hosted runtime smoke flow against a dedicated temporary API and a real H
 npm run smoke:hosted
 ```
 
-It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), a reachable `pi` executable, and valid Pi model credentials/settings. The command removes its temporary API database and runtime roots on every exit.
+It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and valid Pi model credentials/settings in the configured operator agent directory. The command builds an isolated runner image and removes its temporary API database, containers, volumes, and runtime roots on every exit.
 
 ## Repository
 

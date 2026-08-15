@@ -255,9 +255,16 @@ async function materializeRepository(
   processIdentity?: RuntimeProcessIdentity,
 ): Promise<boolean> {
   const gitDirectory = `${launch.workspaceRoot}/.git`;
+  let existingRepository = false;
   try {
     const stats = await fs.stat(gitDirectory);
     if (!stats.isDirectory()) throw new Error("Persistent workspace .git is not a directory");
+    existingRepository = true;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  if (existingRepository) {
     const gitOptions = {
       shell: false as const,
       timeout: 30_000,
@@ -276,8 +283,6 @@ async function materializeRepository(
       throw new Error("Persistent workspace repository does not match hosted runtime launch");
     }
     return false;
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   if (launch.nativeSession.kind === "resume") {

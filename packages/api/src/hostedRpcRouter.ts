@@ -12,7 +12,10 @@ import type { ControlPlaneStore } from "./store.js";
 
 const startupStateRequestId = "pi-cloud-internal-startup-state";
 const stopControlMessage = JSON.stringify({ type: "pi_cloud_stop" });
-const runtimeReadyControlSchema = z.object({ type: z.literal("pi_cloud_runtime_ready") }).strict();
+const runtimeControlSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("pi_cloud_runtime_ready") }).strict(),
+  z.object({ type: z.literal("pi_cloud_runtime_heartbeat") }).strict(),
+]);
 const websocketOpen = 1;
 
 const startupStateResponseSchema = z
@@ -30,7 +33,7 @@ export const hostedPolicyCloseCodes = {
   invalidEnvelope: 4400,
   crossSession: 4404,
   sequenceGap: 4409,
-  duplicateClient: 4409,
+  duplicateClient: 4408,
   budgetExceeded: 4413,
   runtimeDisconnected: 4410,
 } as const;
@@ -45,6 +48,8 @@ type RuntimeConnection = {
   outboundCumulativeBytes: number;
   inboundSequence: number;
   inboundCumulativeBytes: number;
+  lastHeartbeatAt: number;
+  heartbeatTimer?: NodeJS.Timeout;
   client?: ClientConnection;
 };
 
@@ -72,6 +77,7 @@ export class HostedRpcRouter {
   constructor(
     private readonly store: ControlPlaneStore,
     private readonly clock: () => Date = () => new Date(),
+    private readonly heartbeatTimeoutMs = 60_000,
   ) {}
 
   hasRuntime(sessionId: string): boolean {
@@ -87,6 +93,7 @@ export class HostedRpcRouter {
     if (this.closed) return;
     this.closed = true;
     for (const runtime of this.runtimes.values()) {
+      clearInterval(runtime.heartbeatTimer);
       this.store.markHostedSessionStoppedByRuntime(runtime.sessionId, this.clock());
       closeIfOpen(runtime.client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "API shutting down");
       closeIfOpen(runtime.socket, 1001, "API shutting down");
@@ -98,6 +105,19 @@ export class HostedRpcRouter {
   sendStopControl(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId);
     if (runtime && runtime.socket.readyState === websocketOpen) runtime.socket.send(stopControlMessage);
+  }
+
+  /** Closes runtime tunnels that stopped sending authenticated activity or heartbeat controls. */
+  sweepRuntimeHeartbeats(): void {
+    const now = this.clock().getTime();
+    for (const runtime of this.runtimes.values()) {
+      if (now - runtime.lastHeartbeatAt <= this.heartbeatTimeoutMs) continue;
+      this.runtimes.delete(runtime.sessionId);
+      clearInterval(runtime.heartbeatTimer);
+      this.store.markHostedSessionStoppedByRuntime(runtime.sessionId, this.clock());
+      closeIfOpen(runtime.client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
+      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
+    }
   }
 
   /** Registers a claimed runtime's tunnel connection and marks the hosted session running. */
@@ -126,7 +146,13 @@ export class HostedRpcRouter {
       outboundCumulativeBytes: 0,
       inboundSequence: 0,
       inboundCumulativeBytes: 0,
+      lastHeartbeatAt: this.clock().getTime(),
     };
+    runtime.heartbeatTimer = setInterval(
+      () => this.sweepRuntimeHeartbeats(),
+      Math.max(1_000, Math.floor(this.heartbeatTimeoutMs / 2)),
+    );
+    runtime.heartbeatTimer.unref();
     this.runtimes.set(options.sessionId, runtime);
 
     options.socket.on("message", (data, isBinary) => {
@@ -134,6 +160,7 @@ export class HostedRpcRouter {
     });
     options.socket.once("close", () => {
       if (this.runtimes.get(options.sessionId) !== runtime) return;
+      clearInterval(runtime.heartbeatTimer);
       this.runtimes.delete(options.sessionId);
       if (!this.closed) {
         this.store.markHostedSessionStoppedByRuntime(options.sessionId, this.clock());
@@ -175,13 +202,22 @@ export class HostedRpcRouter {
     socket.on("error", () => undefined);
   }
 
+  private touchRuntime(runtime: RuntimeConnection): void {
+    runtime.lastHeartbeatAt = this.clock().getTime();
+    this.store.touchAssignmentHeartbeat(runtime.assignmentId, this.clock());
+  }
+
   private onRuntimeMessage(runtime: RuntimeConnection, data: RawData, isBinary: boolean): void {
     if (!isBinary) {
       const buffer = toBuffer(data);
       if (buffer.byteLength <= runtime.limits.maxRecordBytes) {
         try {
-          if (runtimeReadyControlSchema.safeParse(JSON.parse(buffer.toString("utf8"))).success) {
-            this.store.markHostedSessionRunning(runtime.sessionId, this.clock());
+          const control = runtimeControlSchema.safeParse(JSON.parse(buffer.toString("utf8")));
+          if (control.success) {
+            this.touchRuntime(runtime);
+            if (control.data.type === "pi_cloud_runtime_ready") {
+              this.store.markHostedSessionRunning(runtime.sessionId, this.clock());
+            }
             return;
           }
         } catch {
@@ -205,7 +241,7 @@ export class HostedRpcRouter {
     }
     runtime.inboundSequence += 1;
     runtime.inboundCumulativeBytes += outcome.bytes;
-    this.store.touchAssignmentHeartbeat(runtime.assignmentId, this.clock());
+    this.touchRuntime(runtime);
 
     if (this.interceptStartupState(runtime, outcome.envelope)) return;
     this.forwardToClient(runtime, outcome.envelope);

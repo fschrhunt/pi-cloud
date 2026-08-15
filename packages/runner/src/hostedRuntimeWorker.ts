@@ -20,7 +20,7 @@ import {
   type HostedRuntimeAuthorizedRoots,
 } from "./pathAuthorization.js";
 import { PiRpcSupervisor } from "./piRpcSupervisor.js";
-import { prepareIsolatedWorkspace, type RuntimeProcessIdentity } from "./workspaceIdentity.js";
+import { killWorkspaceProcesses, prepareIsolatedWorkspace, type RuntimeProcessIdentity } from "./workspaceIdentity.js";
 
 const execFileAsync = promisify(execFile);
 const stopControlSchema = z
@@ -108,6 +108,10 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   let inboundCumulativeBytes = 0;
   let lastInboundSequence = 0;
   let stopRequested = false;
+  const heartbeatTimer = setInterval(() => {
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "pi_cloud_runtime_heartbeat" }));
+  }, 15_000);
+  heartbeatTimer.unref();
 
   let supervisor: PiRpcSupervisor;
   try {
@@ -201,6 +205,8 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
     });
   });
 
+  void tunnelFinished.catch(() => undefined);
+
   try {
     await supervisor.started;
     socket.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
@@ -208,8 +214,11 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
     await Promise.race([supervisor.completed, tunnelFinished]);
     return true;
   } finally {
+    stopRequested = true;
+    clearInterval(heartbeatTimer);
     options.signal?.removeEventListener("abort", abortRuntime);
     await supervisor.cancel().catch(() => undefined);
+    if (processIdentity) await killWorkspaceProcesses(processIdentity);
     if (socket.readyState === WebSocket.OPEN) socket.close(1000, "runtime stopped");
     scrubResolvedCredentials(credentials);
   }

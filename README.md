@@ -82,7 +82,7 @@ The next vertical slice starts Pi in the runner, attaches an authenticated clien
 
 - Node.js 22.5 or newer
 - npm 11 or newer
-- Docker for the runner image and local smoke test
+- Docker only for the runner image and local smoke test; checks, builds, API development, and unit tests do not need a running daemon
 
 Install dependencies:
 
@@ -94,6 +94,7 @@ Start the current control plane:
 
 ```bash
 eval "$(node scripts/create-development-keys.mjs)"
+export PI_CLOUD_PUBLIC_BASE_URL="http://host.docker.internal:3000"
 export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_USER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_API_CREDENTIALS="[{\"token\":\"$PI_CLOUD_USER_TOKEN\",\"subjectId\":\"local-user\",\"type\":\"user\",\"displayName\":\"Local User\"}]"
@@ -114,6 +115,22 @@ Run the repository checks:
 npm run check
 npm run build
 npm test
+```
+
+Run the hosted runtime smoke flow against a dedicated temporary API and a real HTTPS repository revision:
+
+```bash
+npm run smoke:hosted
+```
+
+It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and a sanitized, non-secret Pi resource directory readable by isolated workspace UIDs. The command removes its temporary API database, containers, volumes, and runtime roots after success, failure, or termination signals.
+
+On macOS, start Colima on demand before the smoke test and stop it afterward:
+
+```bash
+colima start
+npm run smoke:hosted
+colima stop
 ```
 
 ## Repository

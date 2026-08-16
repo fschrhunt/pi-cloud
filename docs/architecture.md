@@ -37,7 +37,7 @@ HTTP handles create, list, attach, stop, archive, and delete operations. The bid
 
 `packages/runner` opens one authorized workspace, resolves scoped credential references, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
 
-The worker process is disposable. Workspace and native Pi session data persist independently. A replacement worker resumes the native session through Pi's CLI and RPC operations.
+The worker process is disposable. Workspace and native Pi session data persist independently. A replacement worker resumes the native session through Pi's CLI and RPC operations. The shared agent directory is a reviewed, read-only, non-secret resource view; provider credentials arrive only through scoped runtime claims.
 
 ## Workspace
 

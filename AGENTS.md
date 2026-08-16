@@ -11,10 +11,12 @@
 ## Working approach
 
 - Read `docs/product-scope.md`, `README.md`, and `docs/architecture.md` before architectural work.
+- Read files in full before wide-ranging changes. Do not reason from search snippets.
 - Inspect the relevant workspace under `packages/` before changing behavior.
 - Build the smallest vertical slice that advances the requested outcome.
 - Preserve unrelated changes.
 - Update comments and documentation touched by a behavior change.
+- Project Pi prompts live in `.pi/prompts` (`/wr`, `/is`, `/pr`, `/review`).
 
 ## Architecture and security
 
@@ -44,8 +46,20 @@
 - Format commits and pull-request titles as `{feat,fix,docs,refactor,test,chore}[(api,runner,contracts)]: <concise summary>`.
 - Use the package scope when one workspace owns the change.
 - Omit the scope for repository-wide changes.
+- Only commit files you changed in this session. Stage explicit paths; never `git add .` or `git add -A`.
+- Never `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash`, or `git commit --no-verify`.
+- Never force-push. Never push `main`. Every change goes through a PR.
+- Do not commit unless the user asks.
+
+## Issues and PRs
+
+- Review a PR without checking it out. Use `gh pr view`, `gh pr diff`, and local `main`.
+- Write GitHub comments to a temp file and post with `gh issue/pr comment --body-file`.
+- Keep issue and PR prose concise, technical, and emoji-free.
 
 ## Validation
+
+After code changes (not docs-only), run the full output and fix failures before committing:
 
 ```bash
 npm run check
@@ -54,3 +68,7 @@ npm test
 ```
 
 Use workspace-scoped commands for focused loops.
+
+## User override
+
+If the user's instructions conflict with this file, ask for explicit confirmation before overriding.

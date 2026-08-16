@@ -1099,8 +1099,8 @@ export class ControlPlaneStore {
     return rows.map(mapHostedSession);
   }
 
-  /** Restarts a fully disconnected stopped session; active runtime teardown must complete first. */
-  startHostedSession(ownerId: string, sessionId: string, now: Date): HostedSession {
+  /** Restarts a fully disconnected stopped session; every runtime teardown in its workspace must complete first. */
+  startHostedSession(ownerId: string, sessionId: string, now: Date, workspaceRuntimeActive = false): HostedSession {
     const timestamp = now.toISOString();
     return this.transaction(() => {
       const session = this.requireHostedSession(ownerId, sessionId);
@@ -1109,6 +1109,9 @@ export class ControlPlaneStore {
         .prepare("SELECT 1 FROM runtime_assignments WHERE hosted_session_id = ? AND stopped_at IS NULL")
         .get(sessionId);
       if (assignment) throw conflict("session_runtime_active", "Hosted session runtime is still stopping");
+      if (workspaceRuntimeActive) {
+        throw conflict("workspace_runtime_active", "Workspace runtime is still stopping");
+      }
       const active = this.database
         .prepare(
           "SELECT id FROM hosted_sessions WHERE workspace_id = ? AND id <> ? AND state IN ('queued','starting','running') LIMIT 1",

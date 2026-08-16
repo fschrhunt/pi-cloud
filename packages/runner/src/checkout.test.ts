@@ -96,18 +96,43 @@ test("checkoutExactRevision allows ordinary dormant submodule metadata without e
   }
 });
 
-test("checkoutExactRevision refuses the wrong immutable revision", async () => {
+test("checkoutExactRevision removes a partial checkout after failure", async () => {
   const fixture = await createRepositoryFixture({ "README.md": "fixture\n" });
   const checkoutRoot = await fs.mkdtemp(join(tmpdir(), "pi-cloud-worktree-"));
+  const checkoutPath = join(checkoutRoot, "repository");
   try {
     await assert.rejects(
       checkoutExactRevision({
-        checkoutPath: join(checkoutRoot, "repository"),
+        checkoutPath,
         revision: "ffffffffffffffffffffffffffffffffffffffff",
         source: { kind: "local-fixture", repositoryUrl, fixturePath: fixture.remote },
         scratchRoot: checkoutRoot,
       }),
     );
+    await assert.rejects(fs.access(checkoutPath), { code: "ENOENT" });
+  } finally {
+    await fs.rm(checkoutRoot, { recursive: true, force: true });
+    await fs.rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("checkoutExactRevision aborts Git work and removes its partial checkout", async () => {
+  const fixture = await createRepositoryFixture({ "README.md": "fixture\n" });
+  const checkoutRoot = await fs.mkdtemp(join(tmpdir(), "pi-cloud-worktree-"));
+  const checkoutPath = join(checkoutRoot, "repository");
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(
+      checkoutExactRevision({
+        checkoutPath,
+        revision: fixture.revision,
+        source: { kind: "local-fixture", repositoryUrl, fixturePath: fixture.remote },
+        scratchRoot: checkoutRoot,
+      }, { signal: controller.signal }),
+      { name: "AbortError" },
+    );
+    await assert.rejects(fs.access(checkoutPath), { code: "ENOENT" });
   } finally {
     await fs.rm(checkoutRoot, { recursive: true, force: true });
     await fs.rm(fixture.root, { recursive: true, force: true });

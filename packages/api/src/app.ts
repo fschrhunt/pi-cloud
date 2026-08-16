@@ -1,26 +1,56 @@
 import { Readable } from "node:stream";
 import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import type WebSocket from "ws";
 import { ZodError, z } from "zod";
 import { Authenticator, bearerToken, hasBearerToken } from "./auth.js";
 import type { ApiConfig } from "./config.js";
 import { ControlPlane } from "./controlPlane.js";
-import type { Principal, RunEvent } from "./domain.js";
+import type { HostedSession, Principal, RunEvent, Workspace } from "./domain.js";
 import { ApiError, unauthorized } from "./errors.js";
+import { HostedControlPlane } from "./hostedControlPlane.js";
 
-const idParamsSchema = z.object({ agentId: z.string().uuid().optional(), runId: z.string().uuid().optional(), leaseId: z.string().uuid().optional() });
+declare module "fastify" {
+  interface FastifyRequest {
+    hostedClientSession?: HostedSession;
+    hostedRuntimeAssignment?: { assignmentId: string; session: HostedSession; workspace: Workspace };
+  }
+}
+
+const idParamsSchema = z.object({
+  agentId: z.string().uuid().optional(),
+  runId: z.string().uuid().optional(),
+  leaseId: z.string().uuid().optional(),
+  workspaceId: z.string().uuid().optional(),
+  sessionId: z.string().uuid().optional(),
+});
 
 /** Builds the authenticated control-plane HTTP surface without binding a port. */
 export async function buildApp(config: ApiConfig, clock?: () => Date) {
   const app = Fastify({
     logger: {
-      redact: ["req.headers.authorization", "req.headers['x-api-key']", "headers.authorization"],
+      redact: [
+        "req.headers.authorization",
+        "req.headers['x-api-key']",
+        "req.headers['sec-websocket-protocol']",
+        "headers.authorization",
+        "headers['sec-websocket-protocol']",
+      ],
     },
   });
   const controlPlane = new ControlPlane(config, clock);
+  const hostedControlPlane = new HostedControlPlane(config, controlPlane.store, clock);
   const authenticator = new Authenticator(config.apiCredentials);
 
   await app.register(cors, { origin: false });
+  await app.register(websocket, {
+    options: {
+      maxPayload: config.hostedLaunchLimits.maxRecordBytes,
+      handleProtocols: (protocols) => protocols.has("pi-cloud-rpc") ? "pi-cloud-rpc" : false,
+    },
+  });
+  app.addHook("preClose", async () => hostedControlPlane.close());
   app.addHook("onClose", async () => controlPlane.close());
 
   app.setErrorHandler((error, request, reply) => {
@@ -120,6 +150,115 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
     );
   });
 
+  app.post("/v1/workspaces", async (request, reply) => {
+    const workspace = hostedControlPlane.createWorkspace(
+      principal(request.headers.authorization),
+      request.body,
+      request.headers["idempotency-key"],
+    );
+    return reply.code(201).send(workspace);
+  });
+
+  app.get("/v1/workspaces", async (request) =>
+    hostedControlPlane.listWorkspaces(principal(request.headers.authorization), request.query),
+  );
+
+  app.get("/v1/workspaces/:workspaceId", async (request) => {
+    const { workspaceId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.getWorkspace(principal(request.headers.authorization), required(workspaceId));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions", async (request, reply) => {
+    const { workspaceId } = idParamsSchema.parse(request.params);
+    const session = hostedControlPlane.createHostedSession(
+      principal(request.headers.authorization),
+      required(workspaceId),
+      request.body,
+      request.headers["idempotency-key"],
+    );
+    return reply.code(201).send(session);
+  });
+
+  app.get("/v1/hosted-sessions/:sessionId", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.getHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/start", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.startHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/stop", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.stopHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/archive", async (request) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    return hostedControlPlane.archiveHostedSession(principal(request.headers.authorization), required(sessionId));
+  });
+
+  app.post("/v1/hosted-sessions/:sessionId/rpc-ticket", async (request, reply) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    const ticket = hostedControlPlane.issueClientTicket(
+      principal(request.headers.authorization),
+      required(sessionId),
+    );
+    return reply.header("cache-control", "no-store").code(201).send(ticket);
+  });
+
+  app.get(
+    "/v1/hosted-sessions/:sessionId/rpc",
+    {
+      websocket: true,
+      preHandler: async (request) => {
+        const { sessionId } = idParamsSchema.parse(request.params);
+        const id = required(sessionId);
+        request.hostedClientSession = request.headers.authorization
+          ? hostedControlPlane.authorizeClientConnection(principal(request.headers.authorization), id)
+          : hostedControlPlane.authorizeClientTicket(id, browserAttachmentTicket(request.headers["sec-websocket-protocol"]));
+      },
+    },
+    (socket: WebSocket, request) => {
+      const session = request.hostedClientSession as HostedSession;
+      hostedControlPlane.router.attachClient(session.id, socket);
+    },
+  );
+
+  app.post("/internal/v1/hosted-runtimes/claim", async (request, reply) => {
+    requireDispatcher(request.headers.authorization, config.dispatcherToken);
+    const claim = hostedControlPlane.claimHostedRuntime(request.body);
+    return claim ? reply.code(201).send(claim) : reply.code(204).send();
+  });
+
+  app.get(
+    "/internal/v1/hosted-sessions/:sessionId/tunnel",
+    {
+      websocket: true,
+      preHandler: async (request) => {
+        const { sessionId } = idParamsSchema.parse(request.params);
+        const token = bearerToken(request.headers.authorization);
+        if (!token) throw unauthorized();
+        const id = required(sessionId);
+        request.hostedRuntimeAssignment = hostedControlPlane.authorizeRuntimeAssignment(id, token);
+        if (hostedControlPlane.router.hasRuntime(id)) {
+          throw new ApiError(409, "runtime_already_connected", "Hosted session runtime is already connected");
+        }
+      },
+    },
+    (socket: WebSocket, request) => {
+      const assignment = request.hostedRuntimeAssignment as NonNullable<typeof request.hostedRuntimeAssignment>;
+      hostedControlPlane.router.attachRuntime({
+        sessionId: assignment.session.id,
+        assignmentId: assignment.assignmentId,
+        workspaceRoot: assignment.workspace.root,
+        limits: config.hostedLaunchLimits,
+        socket,
+      });
+    },
+  );
+
   app.post("/internal/v1/runs/claim", async (request, reply) => {
     requireDispatcher(request.headers.authorization, config.dispatcherToken);
     const lease = controlPlane.claimRun(request.body);
@@ -178,14 +317,30 @@ async function* eventStream(
       yield formatSse(event);
     }
     if (events.length === ControlPlane.eventBatchSize) {
-      events = controlPlane.listEvents(principal, runId, cursor);
+      try {
+        events = controlPlane.listEvents(principal, runId, cursor);
+      } catch (error: unknown) {
+        if (error instanceof ApiError && error.statusCode === 404) return;
+        throw error;
+      }
       continue;
     }
-    if (!follow || controlPlane.isRunTerminal(principal, runId)) return;
+    if (!follow) return;
+    try {
+      if (controlPlane.isRunTerminal(principal, runId)) return;
+    } catch (error: unknown) {
+      if (error instanceof ApiError && error.statusCode === 404) return;
+      throw error;
+    }
     await delay(15_000);
     if (disconnected()) return;
     yield `: heartbeat ${new Date().toISOString()}\n\n`;
-    events = controlPlane.listEvents(principal, runId, cursor);
+    try {
+      events = controlPlane.listEvents(principal, runId, cursor);
+    } catch (error: unknown) {
+      if (error instanceof ApiError && error.statusCode === 404) return;
+      throw error;
+    }
   }
 }
 
@@ -200,6 +355,14 @@ function requireDispatcher(authorization: string | undefined, expected: string):
 function required(value: string | undefined): string {
   if (!value) throw new ApiError(400, "invalid_request", "Required identifier is missing");
   return value;
+}
+
+function browserAttachmentTicket(protocolHeader: string | string[] | undefined): string | undefined {
+  const protocols = (Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader ?? "")
+    .split(",")
+    .map((value) => value.trim());
+  if (!protocols.includes("pi-cloud-rpc")) return undefined;
+  return protocols.find((value) => value.startsWith("pi-cloud-ticket."))?.slice("pi-cloud-ticket.".length);
 }
 
 function delay(milliseconds: number): Promise<void> {

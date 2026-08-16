@@ -1,0 +1,155 @@
+import { isAbsolute } from "node:path";
+import { z } from "zod";
+import { immutableRevisionSchema, repositoryUrlSchema } from "./repository.js";
+
+const absolutePathSchema = z.string().min(1).refine(isAbsolute, "path must be absolute");
+
+/** Public metadata naming one credential that may be resolved into a scoped runtime claim. */
+export const hostedCredentialReferenceSchema = z
+  .object({
+    name: z.string().min(1).max(200),
+    reference: z.string().min(1).max(1_024),
+    environmentVariable: z.string().regex(/^[A-Z_][A-Z0-9_]*$/u),
+  })
+  .strict();
+
+export const hostedCredentialReferencesSchema = z.array(hostedCredentialReferenceSchema).max(100).superRefine((references, context) => {
+  const names = new Set<string>();
+  const referencesSeen = new Set<string>();
+  const environmentVariables = new Set<string>();
+  for (const [index, reference] of references.entries()) {
+    if (names.has(reference.name)) {
+      context.addIssue({ code: "custom", message: "credential reference names must be unique", path: [index, "name"] });
+    }
+    if (referencesSeen.has(reference.reference)) {
+      context.addIssue({
+        code: "custom",
+        message: "credential references must be unique",
+        path: [index, "reference"],
+      });
+    }
+    if (environmentVariables.has(reference.environmentVariable)) {
+      context.addIssue({
+        code: "custom",
+        message: "credential environment variables must be unique",
+        path: [index, "environmentVariable"],
+      });
+    }
+    names.add(reference.name);
+    referencesSeen.add(reference.reference);
+    environmentVariables.add(reference.environmentVariable);
+  }
+});
+
+export const hostedRuntimeLimitsSchema = z
+  .object({
+    wallTimeSeconds: z.number().int().positive(),
+    idleTimeSeconds: z.number().int().positive(),
+    terminationGraceSeconds: z.number().int().nonnegative(),
+    maxRecordBytes: z.number().int().positive(),
+    maxCumulativeBytes: z.number().int().positive(),
+  })
+  .strict()
+  .refine((limits) => limits.maxCumulativeBytes >= limits.maxRecordBytes, {
+    message: "maxCumulativeBytes must be at least maxRecordBytes",
+    path: ["maxCumulativeBytes"],
+  });
+
+export const nativePiSessionTargetSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("new"),
+      sessionDirectory: absolutePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("resume"),
+      sessionFile: absolutePathSchema,
+    })
+    .strict(),
+]);
+
+/** Version 1 authority and process inputs for one persistent hosted Pi runtime. */
+export const hostedRuntimeLaunchSchema = z
+  .object({
+    version: z.literal(1),
+    hostedSessionId: z.uuid(),
+    workspaceId: z.uuid(),
+    workspaceRoot: absolutePathSchema,
+    repository: z
+      .object({
+        repositoryUrl: repositoryUrlSchema,
+        revision: immutableRevisionSchema,
+      })
+      .strict(),
+    nativeSession: nativePiSessionTargetSchema,
+    piAgentDirectory: absolutePathSchema,
+    credentialReferences: hostedCredentialReferencesSchema,
+    limits: hostedRuntimeLimitsSchema,
+    projectTrust: z.enum(["trusted", "untrusted"]),
+  })
+  .strict();
+
+const hostedCredentialValueSchema = z
+  .object({
+    reference: z.string().min(1).max(1_024),
+    value: z.string().min(1).max(65_536),
+  })
+  .strict();
+
+/** WebSocket endpoint for one claimed runtime; credentials must not be embedded in its URL. */
+export const hostedTunnelUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    const url = new URL(value);
+    return (url.protocol === "ws:" || url.protocol === "wss:") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "";
+  }, "tunnel URL must be a ws/wss endpoint without credentials or query data");
+
+/** Ephemeral dispatcher response containing only credentials granted to the claimed workspace. */
+export const hostedRuntimeClaimSchema = z
+  .object({
+    launch: hostedRuntimeLaunchSchema,
+    credentials: z.array(hostedCredentialValueSchema).max(100),
+    tunnel: z
+      .object({
+        url: hostedTunnelUrlSchema,
+        token: z.string().min(32).max(200),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((claim, context) => {
+    const expected = new Set(claim.launch.credentialReferences.map((credential) => credential.reference));
+    const supplied = new Set<string>();
+    let credentialBytes = 0;
+    for (const [index, credential] of claim.credentials.entries()) {
+      credentialBytes += Buffer.byteLength(credential.value, "utf8");
+      if (!expected.has(credential.reference)) {
+        context.addIssue({ code: "custom", message: "claim credential is not granted by the launch", path: ["credentials", index, "reference"] });
+      }
+      if (supplied.has(credential.reference)) {
+        context.addIssue({ code: "custom", message: "claim credential references must be unique", path: ["credentials", index, "reference"] });
+      }
+      supplied.add(credential.reference);
+    }
+    for (const reference of expected) {
+      if (!supplied.has(reference)) {
+        context.addIssue({ code: "custom", message: "claim is missing a granted credential", path: ["credentials"] });
+      }
+    }
+    if (credentialBytes > 65_536) {
+      context.addIssue({ code: "custom", message: "claim credential values exceed 65536 UTF-8 bytes", path: ["credentials"] });
+    }
+  });
+
+export type HostedCredentialReference = z.infer<typeof hostedCredentialReferenceSchema>;
+export type HostedRuntimeLimits = z.infer<typeof hostedRuntimeLimitsSchema>;
+export type NativePiSessionTarget = z.infer<typeof nativePiSessionTargetSchema>;
+export type HostedRuntimeLaunch = z.infer<typeof hostedRuntimeLaunchSchema>;
+export type HostedRuntimeClaim = z.infer<typeof hostedRuntimeClaimSchema>;

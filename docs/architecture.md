@@ -1,6 +1,6 @@
 # Architecture
 
-Read [product-scope.md](product-scope.md) for the product contract.
+Read [product-scope.md](product-scope.md) for the product contract and [hosted-runtime.md](hosted-runtime.md) for the operator-facing M2 wire contract.
 
 ## Purpose
 
@@ -11,7 +11,7 @@ Pi Cloud makes an unmodified Pi session available from another device. It separa
 ```text
 browser / CLI / local Pi extension
                  │
-      authenticated HTTP + stream
+   authenticated HTTP + WebSocket
                  ▼
        API and session router (`packages/api`)
                  │
@@ -31,19 +31,19 @@ The first deployment runs the API and runtime worker on one operator-owned Linux
 
 `packages/api` authenticates clients, authorizes workspace and hosted-session access, stores lifecycle metadata, starts or attaches runtime workers, and routes the public bidirectional stream.
 
-HTTP handles create, list, attach, stop, archive, and delete operations. The bidirectional stream carries a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
+HTTP handles create, list, get, start, stop, and archive operations. Authenticated public and internal WebSockets carry a versioned envelope around Pi RPC commands, responses, events, and extension interactions.
 
 ## Runtime worker
 
-`packages/runner` opens one authorized workspace, resolves scoped credential references, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
+`packages/runner` opens one authorized workspace, receives only that workspace's API-resolved credentials in its claim, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
 
-The worker process is disposable. Workspace and native Pi session data persist independently. A replacement worker resumes the native session through Pi's CLI and RPC operations.
+The trusted worker supervisor is disposable. It retains dispatcher authority, assigns each workspace a distinct operating-system UID, and starts untrusted Pi under that identity. Workspace storage roots are mode `0700`, so Pi cannot inspect the supervisor or sibling repositories and native sessions. A replacement worker derives the same UID and resumes the native session through Pi's CLI and RPC operations. Operator Pi resources are a reviewed, read-only, non-secret view; persisted provider authentication stays outside that view and arrives only through scoped claims. Each hosted session gets separate writable home and temporary directories beside its native session data.
 
 ## Workspace
 
 A workspace has a stable identity, owner, repository origin, root directory, Pi agent-directory reference, active native session reference, and lifecycle state. Repository and session data survive client disconnects and idle runtime shutdown.
 
-Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. Delete terminates execution and removes workspace data, credentials, and temporary files.
+Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. M2 intentionally omits metadata-only deletion because persistent data must not be orphaned; the local provider supports explicit volume-wide cleanup.
 
 ## Pi process
 
@@ -67,7 +67,7 @@ client creates or opens workspace
 → client disconnects while Pi may continue
 → idle Pi process may stop
 → later attachment restarts Pi and resumes its native session
-→ archive or delete performs bounded cleanup
+→ archive retains data, or an operator reset removes the local provider volume
 ```
 
 A hosted session maps one-to-one to a native Pi session. Worker restarts remain infrastructure attempts within that session.
@@ -102,14 +102,17 @@ Reconnect uses Pi RPC state and entry cursors. Cloud metadata records connection
 
 Persistent data includes workspace files, Git metadata, operator Pi resources, opaque native Pi sessions, and lifecycle metadata. Runtime processes, temporary files, and injected operation credentials have bounded lifetimes.
 
-## First vertical slice
+## Current vertical slice
 
 ```text
 open one workspace
+→ claim one hosted runtime
 → start unmodified Pi RPC in the runner
 → attach an authenticated client
 → prompt and stream native Pi events
 → disconnect and reconnect
-→ resume the same native Pi session
-→ stop the process while retaining the workspace
+→ stop and restart the runtime
+→ resume the same native Pi session in the same workspace
 ```
+
+This slice now works end-to-end for one operator-owned server. It remains pre-alpha and does not yet provide multi-tenant hardening or production pooling.

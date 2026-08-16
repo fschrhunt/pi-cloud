@@ -63,13 +63,16 @@ export function parseControlPlaneUrl(value: string): URL {
     throw new Error("PI_CLOUD_CONTROL_PLANE_URL must be an absolute URL");
   }
   if (url.protocol === "https:") return url;
-  if (url.protocol === "http:" && isLoopbackHostname(url.hostname)) return url;
-  throw new Error("PI_CLOUD_CONTROL_PLANE_URL must use HTTPS or loopback HTTP");
+  if (url.protocol === "http:" && isLocalDevelopmentHostname(url.hostname)) return url;
+  throw new Error("PI_CLOUD_CONTROL_PLANE_URL must use HTTPS or local development HTTP");
 }
 
-function isLoopbackHostname(hostname: string): boolean {
+function isLocalDevelopmentHostname(hostname: string): boolean {
   const normalized = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
-  return normalized === "localhost" || normalized === "::1" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+  return normalized === "localhost"
+    || normalized === "::1"
+    || normalized === "host.docker.internal"
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized);
 }
 
 function readPublicKey(encodedKey: string) {

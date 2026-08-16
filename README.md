@@ -13,7 +13,7 @@ Run Pi on an always-available server and connect from a browser, CLI, or local P
 Pi Cloud starts the installed CLI with `pi --mode rpc`. Pi owns the conversation, tools, models, compaction, and session data. Pi Cloud provides authenticated remote access, workspace and process lifecycle, isolation, and scoped credentials.
 
 > [!WARNING]
-> Pi Cloud is pre-alpha. The control-plane foundation works; remote Pi RPC execution and production isolation are under construction.
+> Pi Cloud is pre-alpha and currently targets single-operator deployments. Hosted Pi RPC execution, reconnect, and native session resume now work end-to-end; production isolation, pooling, and multi-tenant hardening are still under construction.
 
 ## Experience
 
@@ -33,7 +33,7 @@ A hosted session remains available while its Pi process is disposable. Pi Cloud 
 ```text
 browser / CLI / local Pi extension
                  │
-      authenticated HTTP + stream
+   authenticated HTTP + WebSocket
                  ▼
         Pi Cloud API and router
                  │
@@ -65,24 +65,25 @@ A small trusted Pi package supplies hosted capabilities that are not part of the
 
 ## Project status
 
-The current foundation includes:
+The current pre-alpha slice includes:
 
-- authenticated, SQLite-backed agents, runs, tasks, and lifecycle history;
-- atomic dispatch and single-use Ed25519 task leases;
-- budgets, heartbeats, bounded retry and recovery, and terminal reasons;
-- bounded append-only events with SSE reconnect;
-- exact-revision checkout with provenance reporting;
-- a restrictive local Docker runner baseline.
+- authenticated, SQLite-backed workspace, hosted-session, agent, run, and lifecycle metadata;
+- atomic dispatch, single-use leases, browser attachment tickets, and authenticated public and internal hosted-runtime WebSockets;
+- exact-revision checkout, persistent workspaces, native Pi session resume, and scoped credential references;
+- bounded hosted RPC envelopes, LF JSONL Pi supervision, reconnect, stop, restart, and redaction of configured secrets;
+- a local single-operator Docker baseline and a hosted runtime smoke command.
 
-The next vertical slice starts Pi in the runner, attaches an authenticated client, streams native events, and reconnects to the same session. Follow progress through the [GitHub milestones](https://github.com/fschrhunt/pi-cloud/milestones).
+Not yet included: multi-tenant isolation, pooling, horizontal scaling, and production hardening.
+
+See [docs/hosted-runtime.md](docs/hosted-runtime.md) for the operator contract. Follow broader progress through the [GitHub milestones](https://github.com/fschrhunt/pi-cloud/milestones).
 
 ## Development
 
 ### Requirements
 
-- Node.js 22.5 or newer
+- Node.js 22.19 or newer
 - npm 11 or newer
-- Docker for the runner image and local smoke test
+- Docker only for the runner image and local smoke test; checks, builds, API development, and unit tests do not need a running daemon
 
 Install dependencies:
 
@@ -94,6 +95,7 @@ Start the current control plane:
 
 ```bash
 eval "$(node scripts/create-development-keys.mjs)"
+export PI_CLOUD_PUBLIC_BASE_URL="http://host.docker.internal:3000"
 export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_USER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_API_CREDENTIALS="[{\"token\":\"$PI_CLOUD_USER_TOKEN\",\"subjectId\":\"local-user\",\"type\":\"user\",\"displayName\":\"Local User\"}]"
@@ -116,6 +118,24 @@ npm run build
 npm test
 ```
 
+Run the hosted runtime smoke flow against a dedicated temporary API and a real HTTPS repository revision:
+
+```bash
+npm run smoke:hosted
+```
+
+It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and a sanitized, non-secret Pi resource directory readable by isolated workspace UIDs. The command builds an isolated runner image and removes its temporary API database, containers, volumes, and runtime roots after success, failure, or termination signals.
+
+On a 16 GiB Apple Silicon development Mac, an on-demand Colima VM with four CPUs, four GiB of memory, and a 60 GiB sparse disk leaves enough host headroom while accommodating the Compose runner's two GiB limit:
+
+```bash
+colima start --cpu 4 --memory 4 --disk 60
+npm run smoke:hosted
+colima stop
+```
+
+Do not register Colima as a Homebrew service when Docker is needed only for smoke tests. `docker system df` reports VM storage use; `docker builder prune` removes reproducible build cache when needed. Avoid pruning volumes casually because the local Compose provider deliberately stores workspaces and native sessions in a Docker volume.
+
 ## Repository
 
 ```text
@@ -126,7 +146,7 @@ packages/
 assets/      Project identity assets
 docs/        Product, architecture, and protocol documentation
 scripts/     Development helpers
-compose.yaml Local runner smoke test
+compose.yaml Local single-operator hosted runtime worker example
 ```
 
 All workspaces use strict TypeScript and ESM on Node.js 22 or newer.
@@ -135,6 +155,7 @@ All workspaces use strict TypeScript and ESM on Node.js 22 or newer.
 
 - [Product scope](docs/product-scope.md)
 - [Architecture](docs/architecture.md)
+- [Hosted runtime](docs/hosted-runtime.md)
 - [Control-plane API](docs/control-plane-api.md)
 - [Task leases](docs/task-leases.md)
 

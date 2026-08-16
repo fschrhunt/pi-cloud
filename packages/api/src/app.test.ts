@@ -25,6 +25,18 @@ function config(databasePath = ":memory:"): ApiConfig {
       { token: userToken, subjectId: "user-1", type: "user", displayName: "Test User" },
       { token: otherToken, subjectId: "user-2", type: "user", displayName: "Other User" },
     ],
+    publicBaseUrl: "http://127.0.0.1:0",
+    runtimeWorkspaceRoot: "/srv/pi-cloud/workspaces",
+    runtimeAgentDirectory: "/srv/pi-cloud/agent",
+    hostedLaunchLimits: {
+      wallTimeSeconds: 3_600,
+      idleTimeSeconds: 300,
+      terminationGraceSeconds: 5,
+      maxRecordBytes: 65_536,
+      maxCumulativeBytes: 10_000_000,
+    },
+    hostedCredentialReferences: [],
+    hostedCredentialValues: {},
   };
 }
 

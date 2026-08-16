@@ -14,9 +14,13 @@
     "pretest": "npm run build --workspace=@pi-cloud/contracts",
     "test": "tsx --test src/**/*.test.ts"
   },
+  "devDependencies": {
+    "@types/ws": "^8.18.1"
+  },
   "dependencies": {
     "@pi-cloud/contracts": "0.1.0",
     "@fastify/cors": "^11.3.0",
+    "@fastify/websocket": "^11.3.0",
     "fastify": "^5.11.3",
     "zod": "^4.4.3"
   }

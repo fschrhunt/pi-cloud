@@ -13,11 +13,20 @@ export function workspaceProcessIdentity(workspaceId: string): RuntimeProcessIde
   return { uid, gid: uid };
 }
 
+/** Clears inherited root groups before any Git or Pi child drops to a workspace identity. */
+export function clearSupplementaryGroups(
+  setgroups: ((groups: readonly (string | number)[]) => void) | undefined = process.setgroups,
+): void {
+  if (!setgroups) throw new Error("workspace_uid isolation requires supplementary-group control");
+  setgroups([]);
+}
+
 /** Gives one workspace identity exclusive ownership of its repository, session data, and runtime home. */
 export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Promise<RuntimeProcessIdentity> {
   if (process.platform !== "linux" || process.getuid?.() !== 0) {
     throw new Error("workspace_uid isolation requires a root Linux runner supervisor");
   }
+  clearSupplementaryGroups();
 
   const storageRoot = dirname(launch.workspaceRoot);
   if (basename(storageRoot) !== launch.workspaceId || basename(launch.workspaceRoot) !== "repository") {

@@ -40,6 +40,16 @@ test("dispatcher claim uses scoped bearer authentication", async () => {
   assert.equal(request.url, "http://127.0.0.1:3000/internal/v1/hosted-runtimes/claim");
   assert.equal(request.headers.get("authorization"), "Bearer dispatcher-secret");
   assert.deepEqual(JSON.parse(await request.text()), { runnerId: "hosted-runner-1" });
+
+  const failing = new HostedRuntimeDispatcherClient(new URL("http://127.0.0.1:3000"), "dispatcher-secret", async () =>
+    new Response(JSON.stringify({
+      code: "hosted_runtime_claim_invalid",
+      message: "Hosted runtime claim cannot be built from current configuration",
+    }), { status: 500, headers: { "content-type": "application/json" } }));
+  await assert.rejects(
+    failing.claim("hosted-runner-1"),
+    /hosted_runtime_claim_invalid: Hosted runtime claim cannot be built from current configuration/,
+  );
 });
 
 test("an aborted hosted worker does not open a tunnel or touch workspace paths", async () => {
@@ -85,6 +95,78 @@ test("an aborted hosted worker does not open a tunnel or touch workspace paths",
     signal: controller.signal,
   }), { name: "AbortError" });
   assert.equal(openedTunnel, false);
+});
+
+test("hosted worker rejects RPC traffic received before Pi supervision starts", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "pi-cloud-hosted-early-rpc-"));
+  const workspaceRoot = join(root, "workspaces", "one");
+  const sessionDirectory = join(root, "sessions", "one");
+  const piAgentDirectory = join(root, "agent", "default");
+  await Promise.all([
+    fs.mkdir(join(root, "workspaces"), { recursive: true }),
+    fs.mkdir(sessionDirectory, { recursive: true }),
+    fs.mkdir(piAgentDirectory, { recursive: true }),
+  ]);
+  const launch: HostedRuntimeLaunch = {
+    version: 1,
+    hostedSessionId: "a0d701e3-bae6-427a-bc22-35d885915da3",
+    workspaceId: "66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9",
+    workspaceRoot,
+    repository: {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision: "0123456789abcdef0123456789abcdef01234567",
+    },
+    nativeSession: { kind: "new", sessionDirectory },
+    piAgentDirectory,
+    credentialReferences: [],
+    limits: {
+      wallTimeSeconds: 10,
+      idleTimeSeconds: 5,
+      terminationGraceSeconds: 1,
+      maxRecordBytes: 16_384,
+      maxCumulativeBytes: 100_000,
+    },
+    projectTrust: "untrusted",
+  };
+  const socket = new FakeSocket();
+
+  try {
+    await assert.rejects(runHostedRuntimeWorker({
+      dispatcher: {
+        claim: async () => ({
+          launch,
+          credentials: [],
+          tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" },
+        }),
+      },
+      runnerId: "hosted-runner-early-rpc",
+      authorizedRoots: {
+        workspaceRoots: [join(root, "workspaces")],
+        sessionRoots: [join(root, "sessions")],
+        agentRoots: [join(root, "agent")],
+      },
+      piExecutable: fixture,
+      createWebSocket: () => socket as unknown as WebSocket,
+      checkout: async () => {
+        socket.emit("message", Buffer.from(JSON.stringify({ type: "not-a-stop" })), false);
+        await fs.mkdir(workspaceRoot, { recursive: true });
+        return {
+          repositoryUrl: launch.repository.repositoryUrl,
+          revision: launch.repository.revision,
+          resolvedCommit: launch.repository.revision,
+          transport: "https",
+          credentialSource: "anonymous",
+          credentialScrubbed: true,
+          submodulesInitialized: false,
+          hooksDisabled: true,
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        };
+      },
+    }), /before Pi supervision started/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("hosted worker checks out an absent repository and requests native state on startup", async () => {

@@ -92,6 +92,10 @@ async function reportCheckoutProvenance(app: Awaited<ReturnType<typeof buildApp>
   });
 }
 
+function encodeCursor(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
 test("agent API authenticates, authorizes, paginates, and makes creates idempotent", async () => {
   const app = await buildApp(config());
   const unauthorized = await app.inject({ method: "GET", url: "/v1/agents" });
@@ -127,6 +131,27 @@ test("agent API authenticates, authorizes, paginates, and makes creates idempote
   assert.equal(busyFollowUp.statusCode, 409);
   assert.equal(busyFollowUp.json().code, "agent_busy");
 
+  await app.close();
+});
+
+test("list endpoints reject invalid pagination cursors for classic and hosted resources", async () => {
+  const app = await buildApp(config());
+  await createAgent(app, "cursor-agent-0001");
+  await app.inject({
+    method: "POST",
+    url: "/v1/workspaces",
+    headers: { ...authorization, "idempotency-key": "cursor-workspace-0001" },
+    payload: { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+  });
+  const invalidCursor = encodeCursor({ createdAt: "", id: "00000000-0000-0000-0000-000000000000", extra: true });
+
+  const agents = await app.inject({ method: "GET", url: `/v1/agents?cursor=${invalidCursor}`, headers: authorization });
+  const workspaces = await app.inject({ method: "GET", url: `/v1/workspaces?cursor=${invalidCursor}`, headers: authorization });
+
+  assert.equal(agents.statusCode, 409);
+  assert.equal(agents.json().code, "invalid_cursor");
+  assert.equal(workspaces.statusCode, 409);
+  assert.equal(workspaces.json().code, "invalid_cursor");
   await app.close();
 });
 

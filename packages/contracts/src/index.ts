@@ -13,6 +13,7 @@ export {
   hostedRuntimeClaimSchema,
   hostedRuntimeLaunchSchema,
   hostedRuntimeLimitsSchema,
+  hostedTunnelUrlSchema,
   nativePiSessionTargetSchema,
   type HostedCredentialReference,
   type HostedRuntimeClaim,

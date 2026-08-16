@@ -55,6 +55,8 @@ async function main() {
   const terminate = (signal) => {
     if (terminating) return;
     terminating = true;
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
     buildChild?.kill("SIGTERM");
     void cleanup()
       .catch((error) => console.error(`Smoke cleanup failed after ${signal}: ${error instanceof Error ? error.message : String(error)}`))
@@ -543,7 +545,7 @@ async function cleanupSmokeCompose(config) {
   await runDockerCommand(
     config,
     ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"],
-    { failureMessage: "Unable to clean smoke Compose project" },
+    { timeoutMs: 60_000, failureMessage: "Unable to clean smoke Compose project" },
   );
 }
 
@@ -913,7 +915,7 @@ class HostedClientConnection {
 
     socket.on("message", (data, isBinary) => {
       if (isBinary) {
-        this.reject(new Error("Hosted client received an unexpected binary frame"));
+        this.fail(new Error("Hosted client received an unexpected binary frame"));
         return;
       }
       try {
@@ -933,16 +935,16 @@ class HostedClientConnection {
         this.inboundSequence = envelope.sequence;
         this.push(envelope);
       } catch (error) {
-        this.reject(error instanceof Error ? error : new Error(String(error)));
+        this.fail(error instanceof Error ? error : new Error(String(error)));
       }
     });
     socket.once("close", (code, reason) => {
-      this.closed = new Error(`Hosted client WebSocket closed (${code}): ${Buffer.from(reason).toString("utf8")}`);
+      this.closed ??= new Error(`Hosted client WebSocket closed (${code}): ${Buffer.from(reason).toString("utf8")}`);
       this.reject(this.closed);
     });
     socket.once("error", (error) => {
-      this.closed = error;
-      this.reject(error);
+      this.closed ??= error;
+      this.reject(this.closed);
     });
   }
 
@@ -961,11 +963,8 @@ class HostedClientConnection {
     if (this.queue.length > 0) return this.queue.shift();
     if (this.closed) throw this.closed;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.waiters = this.waiters.filter((waiter) => waiter.reject !== reject);
-        reject(new Error(`Timed out waiting for hosted session envelope after ${timeoutMs}ms`));
-      }, timeoutMs);
-      this.waiters.push({
+      let timer;
+      const waiter = {
         resolve: (value) => {
           clearTimeout(timer);
           resolve(value);
@@ -974,7 +973,12 @@ class HostedClientConnection {
           clearTimeout(timer);
           reject(error);
         },
-      });
+      };
+      timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((candidate) => candidate !== waiter);
+        reject(new Error(`Timed out waiting for hosted session envelope after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.waiters.push(waiter);
     });
   }
 
@@ -996,6 +1000,14 @@ class HostedClientConnection {
 
   reject(error) {
     while (this.waiters.length > 0) this.waiters.shift().reject(error);
+  }
+
+  fail(error) {
+    if (this.closed) return;
+    this.closed = error;
+    this.queue.length = 0;
+    this.reject(error);
+    if (this.socket.readyState < WebSocket.CLOSING) this.socket.terminate();
   }
 }
 
@@ -1215,11 +1227,32 @@ function appendBoundedDiagnostic(current, chunk, secrets = []) {
 
 /** Redacts configured secret strings from a bounded diagnostic before exposing it to callers. */
 function redactBoundedDiagnostic(text, secrets) {
-  const redacted = [...secrets]
+  const normalizedSecrets = [...secrets]
     .filter(Boolean)
-    .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left))
-    .reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
-  return boundedUtf8Tail(redacted, maxDiagnosticBytes);
+    .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left));
+  const redacted = normalizedSecrets.reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
+  const longestSecretBytes = normalizedSecrets.reduce(
+    (maximum, secret) => Math.max(maximum, Buffer.byteLength(secret)),
+    0,
+  );
+  const boundarySafe = Buffer.byteLength(text) >= maxDiagnosticBytes + longestSecretBytes
+    ? redactSecretSuffixAtStart(redacted, normalizedSecrets)
+    : redacted;
+  return boundedUtf8Tail(boundarySafe, maxDiagnosticBytes);
+}
+
+/** Redacts a secret suffix cut by the diagnostic's retained-tail boundary. */
+function redactSecretSuffixAtStart(value, secrets) {
+  let matchedLength = 0;
+  for (const secret of secrets) {
+    for (let length = secret.length - 1; length > matchedLength; length -= 1) {
+      if (value.startsWith(secret.slice(-length))) {
+        matchedLength = length;
+        break;
+      }
+    }
+  }
+  return matchedLength === 0 ? value : `[REDACTED]${value.slice(matchedLength)}`;
 }
 
 function boundedUtf8Tail(text, maxBytes) {
@@ -1248,7 +1281,7 @@ async function withTimeout(promise, timeoutMs, message) {
   }
 }
 
-export { appendBoundedDiagnostic, redactBoundedDiagnostic, waitForSessionStateWithFetcher };
+export { appendBoundedDiagnostic, HostedClientConnection, redactBoundedDiagnostic, waitForSessionStateWithFetcher };
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {

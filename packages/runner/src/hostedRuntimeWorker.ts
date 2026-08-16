@@ -72,7 +72,10 @@ export class HostedRuntimeDispatcherClient {
       body: JSON.stringify({ runnerId }),
     });
     if (response.status === 204) return null;
-    if (!response.ok) throw new Error(`Hosted runtime claim failed with ${response.status}`);
+    if (!response.ok) {
+      const diagnostic = await safeClaimError(response);
+      throw new Error(`Hosted runtime claim failed with ${response.status}${diagnostic ? `: ${diagnostic}` : ""}`);
+    }
     return hostedRuntimeClaimSchema.parse(await response.json());
   }
 }
@@ -114,7 +117,6 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   let lastInboundSequence = 0;
   let stopRequested = false;
   let supervisor: PiRpcSupervisor | undefined;
-  const pendingMessages: Array<{ data: RawData; isBinary: boolean }> = [];
   let resolveTunnel!: () => void;
   let rejectTunnel!: (error: Error) => void;
   const tunnelFinished = new Promise<void>((resolve, reject) => {
@@ -122,10 +124,6 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
     rejectTunnel = reject;
   });
   const handleTunnelMessage = (data: RawData, isBinary: boolean) => {
-    if (!supervisor) {
-      pendingMessages.push({ data, isBinary });
-      return;
-    }
     if (isBinary) {
       rejectTunnel(new Error("Hosted runtime tunnel does not accept binary messages"));
       return;
@@ -135,6 +133,11 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
       if (raw.byteLength > launch.limits.maxRecordBytes) throw new Error("Tunnel record exceeds maxRecordBytes");
       const value = JSON.parse(raw.toString("utf8")) as unknown;
       const stop = stopControlSchema.safeParse(value);
+      if (!supervisor) {
+        if (!stop.success) throw new Error("Hosted runtime received RPC traffic before Pi supervision started");
+        stopRequested = true;
+        return;
+      }
       if (stop.success) {
         stopRequested = true;
         void supervisor.cancel().then(resolveTunnel, rejectTunnel);
@@ -216,8 +219,6 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
     throw error;
   }
 
-  for (const pending of pendingMessages.splice(0)) handleTunnelMessage(pending.data, pending.isBinary);
-
   const abortRuntime = () => {
     stopRequested = true;
     void supervisor?.cancel();
@@ -227,6 +228,10 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
 
   try {
     await supervisor.started;
+    if (stopRequested) {
+      await supervisor.cancel();
+      return true;
+    }
     socket.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
     supervisor.send({ type: "get_state", id: "pi-cloud-internal-startup-state" });
     await Promise.race([supervisor.completed, tunnelFinished]);
@@ -378,6 +383,18 @@ function waitForOpen(socket: WebSocket, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
   });
+}
+
+async function safeClaimError(response: Response): Promise<string> {
+  const text = (await response.text()).slice(0, 4_096);
+  try {
+    const parsed = JSON.parse(text) as { code?: unknown; message?: unknown };
+    const code = typeof parsed.code === "string" ? parsed.code : undefined;
+    const message = typeof parsed.message === "string" ? parsed.message : undefined;
+    return [code, message].filter(Boolean).join(": ");
+  } catch {
+    return "";
+  }
 }
 
 function rawDataToBuffer(data: RawData): Buffer {

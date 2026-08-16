@@ -5,12 +5,13 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([z.null(), z.boolean(), z.number().finite(), z.string(), z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema)]),
 );
-const requestIdSchema = z
+const requestIdBaseSchema = z
   .string()
   .min(1)
   .max(1_024)
-  .refine((value) => !value.startsWith("pi-cloud-internal-"), "request ID uses a reserved Pi Cloud prefix")
-  .optional();
+  .refine((value) => !value.startsWith("pi-cloud-internal-"), "request ID uses a reserved Pi Cloud prefix");
+const requestIdSchema = requestIdBaseSchema.optional();
+const requiredRequestIdSchema = requestIdBaseSchema;
 const imageSchema = z
   .object({
     type: z.literal("image"),
@@ -48,7 +49,7 @@ export const piRpcClientCommandSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("extension_ui_response"),
-      id: z.string().min(1).max(1_024),
+      id: requiredRequestIdSchema,
       value: z.string().optional(),
       confirmed: z.boolean().optional(),
       cancelled: z.boolean().optional(),

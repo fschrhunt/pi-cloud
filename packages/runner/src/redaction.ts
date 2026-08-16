@@ -16,6 +16,7 @@ export class BoundedStderrDiagnostic {
   private readonly secrets: string[];
   private storedBytes = 0;
   private finished = false;
+  private truncated = false;
 
   constructor(
     configuredSecrets: readonly string[],
@@ -28,8 +29,12 @@ export class BoundedStderrDiagnostic {
   push(chunk: Uint8Array): void {
     if (this.finished || chunk.byteLength === 0) return;
     const allowance = this.maxBytes + this.longestSecretBytes - this.storedBytes;
-    if (allowance <= 0) return;
+    if (allowance <= 0) {
+      this.truncated = true;
+      return;
+    }
     const kept = Buffer.from(chunk).subarray(0, allowance);
+    if (kept.byteLength < chunk.byteLength) this.truncated = true;
     this.storedBytes += kept.byteLength;
     this.chunks.push(this.decoder.write(kept));
   }
@@ -39,7 +44,9 @@ export class BoundedStderrDiagnostic {
       this.chunks.push(this.decoder.end());
       this.finished = true;
     }
-    return truncateUtf8(redactString(this.chunks.join(""), this.secrets), this.maxBytes);
+    const redacted = redactString(this.chunks.join(""), this.secrets);
+    const boundarySafe = this.truncated ? redactSecretPrefixAtEnd(redacted, this.secrets) : redacted;
+    return truncateUtf8(boundarySafe, this.maxBytes);
   }
 
   private get longestSecretBytes(): number {
@@ -66,6 +73,20 @@ function redactString(value: string, secrets: readonly string[]): string {
   let result = value;
   for (const secret of secrets) result = result.split(secret).join(redactionMarker);
   return result;
+}
+
+/** Redacts a secret prefix cut by the diagnostic's retained-head boundary. */
+function redactSecretPrefixAtEnd(value: string, secrets: readonly string[]): string {
+  let matchedLength = 0;
+  for (const secret of secrets) {
+    for (let length = secret.length - 1; length > matchedLength; length -= 1) {
+      if (value.endsWith(secret.slice(0, length))) {
+        matchedLength = length;
+        break;
+      }
+    }
+  }
+  return matchedLength === 0 ? value : `${value.slice(0, -matchedLength)}${redactionMarker}`;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

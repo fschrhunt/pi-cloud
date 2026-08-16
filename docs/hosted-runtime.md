@@ -88,6 +88,12 @@ Each internal claim returns:
     },
     "projectTrust": "untrusted"
   },
+  "credentials": [
+    {
+      "reference": "vault://provider/key",
+      "value": "short-lived-scoped-secret"
+    }
+  ],
   "tunnel": {
     "url": "wss://pi-cloud.example.com/internal/v1/hosted-sessions/<session-id>/tunnel",
     "token": "short-lived-scoped-assignment-token"
@@ -105,7 +111,7 @@ Public client:
 - non-browser auth: normal API bearer token in `Authorization`
 - browser auth: mint a ticket with an authenticated `POST /v1/hosted-sessions/:sessionId/rpc-ticket`, then open the WebSocket with subprotocols `pi-cloud-rpc` and `pi-cloud-ticket.<ticket>`
 - ticket policy: random, single-use, valid for 60 seconds, scoped to one hosted session, and one outstanding ticket per session
-- policy: one active client per hosted session
+- policy: one active client per hosted session; the API pings clients and releases an unresponsive slot without stopping the runtime
 
 The browser flow keeps bearer credentials out of WebSocket URLs and works with the native browser `WebSocket` API:
 
@@ -233,7 +239,7 @@ Stable policy close codes:
 
 Other important failures:
 
-- missing credential values fail the worker before Pi starts;
+- missing credential values reject the claim before the session leaves `queued`, and the dispatcher receives an actionable configuration error;
 - repository or path mismatches fail the runtime attempt; unconnected assignment authority expires after 60 seconds;
 - connected workers send 15-second heartbeat controls, and the API stops a runtime after 60 seconds without authenticated activity;
 - a `resume` launch without the persistent repository fails closed;

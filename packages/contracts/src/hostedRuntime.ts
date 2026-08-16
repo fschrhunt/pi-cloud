@@ -98,6 +98,19 @@ const hostedCredentialValueSchema = z
   })
   .strict();
 
+/** WebSocket endpoint for one claimed runtime; credentials must not be embedded in its URL. */
+export const hostedTunnelUrlSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    const url = new URL(value);
+    return (url.protocol === "ws:" || url.protocol === "wss:") &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === "";
+  }, "tunnel URL must be a ws/wss endpoint without credentials or query data");
+
 /** Ephemeral dispatcher response containing only credentials granted to the claimed workspace. */
 export const hostedRuntimeClaimSchema = z
   .object({
@@ -105,7 +118,7 @@ export const hostedRuntimeClaimSchema = z
     credentials: z.array(hostedCredentialValueSchema).max(100),
     tunnel: z
       .object({
-        url: z.string().url(),
+        url: hostedTunnelUrlSchema,
         token: z.string().min(32).max(200),
       })
       .strict(),

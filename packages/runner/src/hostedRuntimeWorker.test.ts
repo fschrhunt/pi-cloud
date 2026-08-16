@@ -42,6 +42,51 @@ test("dispatcher claim uses scoped bearer authentication", async () => {
   assert.deepEqual(JSON.parse(await request.text()), { runnerId: "hosted-runner-1" });
 });
 
+test("an aborted hosted worker does not open a tunnel or touch workspace paths", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let openedTunnel = false;
+  const launch: HostedRuntimeLaunch = {
+    version: 1,
+    hostedSessionId: "a0d701e3-bae6-427a-bc22-35d885915da3",
+    workspaceId: "66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9",
+    workspaceRoot: "/workspace/repository",
+    repository: {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision: "0123456789abcdef0123456789abcdef01234567",
+    },
+    nativeSession: { kind: "new", sessionDirectory: "/workspace/native-sessions/one" },
+    piAgentDirectory: "/agent",
+    credentialReferences: [],
+    limits: {
+      wallTimeSeconds: 10,
+      idleTimeSeconds: 5,
+      terminationGraceSeconds: 1,
+      maxRecordBytes: 16_384,
+      maxCumulativeBytes: 100_000,
+    },
+    projectTrust: "untrusted",
+  };
+
+  await assert.rejects(runHostedRuntimeWorker({
+    dispatcher: {
+      claim: async () => ({
+        launch,
+        credentials: [],
+        tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" },
+      }),
+    },
+    runnerId: "hosted-runner-1",
+    authorizedRoots: { workspaceRoots: ["/workspace"], sessionRoots: ["/workspace"], agentRoots: ["/agent"] },
+    createWebSocket: () => {
+      openedTunnel = true;
+      throw new Error("must not create a tunnel after cancellation");
+    },
+    signal: controller.signal,
+  }), { name: "AbortError" });
+  assert.equal(openedTunnel, false);
+});
+
 test("hosted worker checks out an absent repository and requests native state on startup", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "pi-cloud-hosted-worker-"));
   const workspaceRoot = join(root, "workspaces", "one");

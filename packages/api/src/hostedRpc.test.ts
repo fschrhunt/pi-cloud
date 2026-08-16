@@ -312,6 +312,42 @@ test("browser attachment tickets expire before WebSocket use", async () => {
   await app.close();
 });
 
+test("issuing a browser attachment ticket revokes the previous outstanding ticket for that session", async () => {
+  const fixture = await setup();
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const firstResponse = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(firstResponse.statusCode, 201);
+  const first = firstResponse.json<{ ticket: string }>();
+  const secondResponse = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(secondResponse.statusCode, 201);
+  const second = secondResponse.json<{ ticket: string }>();
+  assert.notEqual(first.ticket, second.ticket);
+
+  const revoked = connectBrowserClient(fixture, first.ticket);
+  const [, revokedResponse] = await waitFor<[unknown, { statusCode: number }]>(revoked, "unexpected-response");
+  assert.equal(revokedResponse.statusCode, 401);
+
+  const browserClient = connectBrowserClient(fixture, second.ticket);
+  await waitFor(browserClient, "open");
+
+  await closeAll(runtime, browserClient);
+  await app.close();
+});
+
 test("hosted RPC endpoints isolate owners and reject invalid or unscoped tokens", async () => {
   const fixture = await setup();
   const { app, sessionId } = fixture;

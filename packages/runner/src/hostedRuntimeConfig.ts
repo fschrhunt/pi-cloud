@@ -1,8 +1,12 @@
-import { delimiter, resolve } from "node:path";
+import { delimiter, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { parseControlPlaneUrl } from "./config.js";
 import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker } from "./hostedRuntimeWorker.js";
 
+const piExecutableSchema = z.string().min(1).refine(
+  (value) => isAbsolute(value) || (!value.includes("/") && !value.includes("\\")),
+  "Pi executable must be a PATH command name or an absolute trusted path",
+);
 const hostedWorkerConfigSchema = z.object({
   dispatcherUrl: z.string().min(1),
   dispatcherToken: z.string().min(1),
@@ -11,8 +15,13 @@ const hostedWorkerConfigSchema = z.object({
   sessionRoots: z.string().min(1),
   agentRoots: z.string().min(1),
   processIsolation: z.enum(["workspace_uid", "inherit"]).default("workspace_uid"),
-  piExecutable: z.string().min(1).optional(),
+  piExecutable: piExecutableSchema.optional(),
 });
+
+/** Validates that Pi resolves only through trusted PATH or an absolute image path, never the workspace. */
+export function parseHostedPiExecutable(value: unknown): string | undefined {
+  return piExecutableSchema.optional().parse(value);
+}
 
 /** Reads production hosted-worker authority separately from the leased one-shot runner configuration. */
 export async function runHostedRuntimeWorkerFromEnv(

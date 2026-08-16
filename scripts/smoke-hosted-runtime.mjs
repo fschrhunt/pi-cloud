@@ -1,0 +1,1260 @@
+#!/usr/bin/env node
+
+/** Exercises an isolated single-operator hosted runtime flow against a dedicated API and real Pi CLI. */
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { delimiter, join, resolve } from "node:path";
+import process from "node:process";
+import { pathToFileURL } from "node:url";
+import WebSocket from "ws";
+
+const apiAppEntry = resolve("packages/api/dist/app.js");
+const apiConfigEntry = resolve("packages/api/dist/config.js");
+const runnerEntry = resolve("packages/runner/dist/runner.js");
+const nodeModulesBin = resolve("node_modules/.bin");
+const defaultExpectedMarker = "SMOKE_OK";
+const maxDiagnosticBytes = 32_768;
+
+async function main() {
+  let controlPlaneRoot;
+  let config;
+  /** @type {RunnerProcess[]} */
+  const runners = [];
+  /** @type {HostedClientConnection[]} */
+  const clients = [];
+  /** @type {ApiProcess | undefined} */
+  let api;
+  let finalSummary;
+  let composeTouched = false;
+  let runtimeFilesMayExist = false;
+  let cleanupPromise;
+  let mainError;
+  let terminating = false;
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let buildChild;
+
+  const cleanup = () => {
+    cleanupPromise ??= config
+      ? cleanupSmokeResources({
+        config,
+        clients,
+        runners,
+        api: () => api,
+        composeTouched,
+        runtimeFilesMayExist,
+      })
+      : controlPlaneRoot
+        ? rm(controlPlaneRoot, { recursive: true, force: true })
+        : Promise.resolve();
+    return cleanupPromise;
+  };
+  const terminate = (signal) => {
+    if (terminating) return;
+    terminating = true;
+    buildChild?.kill("SIGTERM");
+    void cleanup()
+      .catch((error) => console.error(`Smoke cleanup failed after ${signal}: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  const onSigint = () => terminate("SIGINT");
+  const onSigterm = () => terminate("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+
+  try {
+    controlPlaneRoot = await mkdtemp(join(tmpdir(), "pi-cloud-smoke-"));
+    config = await readConfig(process.env, controlPlaneRoot);
+    await assertBuiltRuntime();
+    assertDockerAvailable();
+    await assertHostedAgentDirectory(config.operatorAgentDirectory);
+    composeTouched = true;
+    await buildSmokeRunnerImage(config, (child) => { buildChild = child; });
+    buildChild = undefined;
+    await ensureRuntimeRoots(config);
+    await reserveApiEndpoints(config);
+
+    api = new ApiProcess(config);
+    await api.waitForHealth(30_000);
+
+    const workspace = await createWorkspace(config);
+    const session = await createSession(config, workspace.id);
+    const expectedWorkspaceRoot = workspace.root;
+    runtimeFilesMayExist = true;
+
+    const firstRunner = startHostedRunner(config, "run-1");
+    runners.push(firstRunner);
+
+    const firstRunningSession = await waitForSessionState(config, session.id, ["running"], 120_000, firstRunner);
+    const initialNative = await waitForNativeSession(config, session.id, 120_000, firstRunner);
+    await inspectSmokeRuntime(config, expectedWorkspaceRoot, initialNative.nativeSessionFile);
+
+    const firstClient = await openHostedClient(config, session.id);
+    clients.push(firstClient);
+    const promptResult = await promptAndWait(firstClient, session.id, config.prompt, config.expectedMarker, 180_000);
+    await firstClient.close();
+
+    const reconnectedClient = await openHostedClient(config, session.id);
+    clients.push(reconnectedClient);
+    const reconnectState = await getState(reconnectedClient, session.id, initialNative, 30_000);
+    await reconnectedClient.close();
+
+    await stopSession(config, session.id);
+    const firstStoppedSession = await waitForSessionState(config, session.id, ["stopped"], 120_000, firstRunner);
+    await firstRunner.expectCleanExit(120_000, "first hosted runner stop");
+    if (firstStoppedSession.nativeSessionId !== initialNative.nativeSessionId || firstStoppedSession.nativeSessionFile !== initialNative.nativeSessionFile) {
+      throw new Error("Hosted session metadata changed after the first stop");
+    }
+
+    const restarted = await startSession(config, session.id);
+    if (restarted.state !== "queued") throw new Error(`Restart returned unexpected state: ${restarted.state}`);
+
+    const secondRunner = startHostedRunner(config, "run-2");
+    runners.push(secondRunner);
+    const secondRunningSession = await waitForSessionState(config, session.id, ["running"], 120_000, secondRunner);
+    const resumedNative = await waitForNativeSession(config, session.id, 120_000, secondRunner);
+    if (resumedNative.nativeSessionId !== initialNative.nativeSessionId || resumedNative.nativeSessionFile !== initialNative.nativeSessionFile) {
+      throw new Error("Restart did not resume the same native Pi session metadata");
+    }
+
+    const resumedClient = await openHostedClient(config, session.id);
+    clients.push(resumedClient);
+    const resumedState = await getState(resumedClient, session.id, initialNative, 30_000);
+    const resumedEntries = await getEntries(resumedClient, session.id, config.prompt, config.expectedMarker, 30_000);
+    await resumedClient.close();
+
+    await stopSession(config, session.id);
+    const finalSession = await waitForSessionState(config, session.id, ["stopped"], 120_000, secondRunner);
+    await secondRunner.expectCleanExit(120_000, "second hosted runner stop");
+
+    const finalWorkspace = await getWorkspace(config, workspace.id);
+    if (finalWorkspace.root !== expectedWorkspaceRoot) throw new Error("Workspace root changed across the smoke flow");
+    if (finalSession.nativeSessionFile !== initialNative.nativeSessionFile) throw new Error("Native session file changed across restart");
+    await inspectSmokeRuntime(config, finalWorkspace.root, finalSession.nativeSessionFile);
+
+    finalSummary = {
+      workspaceId: workspace.id,
+      sessionId: session.id,
+      workspaceRoot: finalWorkspace.root,
+      nativeSessionId: resumedState.sessionId,
+      nativeSessionFile: resumedState.sessionFile,
+      promptMessage: promptResult.messageText,
+      firstStartedAt: firstRunningSession.startedAt,
+      secondStartedAt: secondRunningSession.startedAt,
+      reconnectState,
+      resumedEntries,
+    };
+
+    const archived = await archiveSession(config, session.id);
+    if (archived.state !== "archived") throw new Error(`Archive returned unexpected state: ${archived.state}`);
+  } catch (error) {
+    mainError = error;
+    throw error;
+  } finally {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!mainError) throw error;
+      console.error(`Smoke cleanup also failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    }
+  }
+
+  console.log("Hosted runtime smoke passed.");
+  console.log(`Workspace: ${finalSummary.workspaceId} -> ${finalSummary.workspaceRoot}`);
+  console.log(`Hosted session: ${finalSummary.sessionId}`);
+  console.log(`Native session: ${finalSummary.nativeSessionId} -> ${finalSummary.nativeSessionFile}`);
+  console.log(`Prompt result: ${finalSummary.promptMessage}`);
+}
+
+async function readConfig(env, controlPlaneRoot) {
+  const repositoryUrl = required(env.PI_CLOUD_SMOKE_REPOSITORY_URL, "PI_CLOUD_SMOKE_REPOSITORY_URL");
+  const revision = required(env.PI_CLOUD_SMOKE_REVISION, "PI_CLOUD_SMOKE_REVISION");
+  const expectedMarker = env.PI_CLOUD_SMOKE_EXPECTED_MARKER ?? defaultExpectedMarker;
+  if (expectedMarker.length === 0) throw new Error("PI_CLOUD_SMOKE_EXPECTED_MARKER must not be empty");
+  const hostedCredentialReferences = parseHostedCredentialReferences(env.PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES);
+  const credentialReferenceNames = parseCredentialReferenceNames(
+    env.PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES,
+    hostedCredentialReferences,
+  );
+  const hostedCredentials = parseHostedCredentialValues(env.PI_CLOUD_HOSTED_CREDENTIALS, hostedCredentialReferences);
+
+  try {
+    const operatorAgentDirectory = resolve(
+      env.PI_CLOUD_SMOKE_AGENT_DIRECTORY ?? env.PI_CLOUD_HOST_AGENT_DIRECTORY ?? "data/pi-agent",
+    );
+    await assertPathExists(operatorAgentDirectory, "operator Pi agent directory");
+    const dispatcherToken = randomToken();
+    const userToken = randomToken();
+    const taskLeasePrivateKey = generateTaskLeasePrivateKey();
+    const apiCredentialsJson = JSON.stringify([
+      { token: userToken, subjectId: "smoke-user", type: "user", displayName: "Hosted Smoke User" },
+    ]);
+    const hostedCredentialReferencesJson = hostedCredentialReferences.length > 0
+      ? JSON.stringify(hostedCredentialReferences)
+      : undefined;
+
+    return {
+      repositoryUrl,
+      revision,
+      projectTrust: parseProjectTrust(env.PI_CLOUD_SMOKE_PROJECT_TRUST),
+      prompt: env.PI_CLOUD_SMOKE_PROMPT ?? `Reply with the exact text ${expectedMarker} on a single line.`,
+      expectedMarker,
+      userToken,
+      dispatcherToken,
+      taskLeasePrivateKey,
+      apiCredentialsJson,
+      runnerIdBase: `smoke-hosted-${process.pid}-${randomUUID()}`,
+      composeProject: `pi-cloud-smoke-${process.pid}`,
+      controlPlaneRoot,
+      databasePath: join(controlPlaneRoot, "control-plane.sqlite"),
+      workspaceRoots: join(controlPlaneRoot, "workspaces"),
+      sessionRoots: join(controlPlaneRoot, "workspaces"),
+      agentRoots: "/var/lib/pi-cloud/agent",
+      operatorAgentDirectory,
+      hostedCredentialReferencesJson,
+      hostedCredentialsJson: hostedCredentials.json,
+      hostedCredentialValues: hostedCredentials.secrets,
+      credentialReferenceNames,
+      piExecutable: env.PI_CLOUD_SMOKE_PI_EXECUTABLE ?? "pi",
+      secrets: [
+        userToken,
+        dispatcherToken,
+        taskLeasePrivateKey,
+        apiCredentialsJson,
+        hostedCredentials.json,
+        ...hostedCredentials.secrets,
+      ],
+    };
+  } catch (error) {
+    await rm(controlPlaneRoot, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function parseHostedCredentialReferences(value) {
+  if (!value) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES must be valid JSON");
+  }
+  if (!Array.isArray(parsed)) throw new Error("PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES must be a JSON array");
+  const names = new Set();
+  const environmentVariables = new Set();
+  return parsed.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}] must be an object`);
+    }
+    const keys = Object.keys(entry);
+    if (keys.some((key) => !["name", "reference", "environmentVariable"].includes(key))) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}] contains an unsupported field`);
+    }
+    const { name, reference, environmentVariable } = entry;
+    if (typeof name !== "string" || name.length === 0 || name.length > 200) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].name must be a 1-200 character string`);
+    }
+    if (typeof reference !== "string" || reference.length === 0 || reference.length > 1024) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].reference must be a 1-1024 character string`);
+    }
+    if (typeof environmentVariable !== "string" || !/^[A-Z_][A-Z0-9_]*$/u.test(environmentVariable)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES[${index}].environmentVariable must be a valid environment variable name`);
+    }
+    if (names.has(name)) throw new Error(`Duplicate hosted credential reference name: ${name}`);
+    if (environmentVariables.has(environmentVariable)) {
+      throw new Error(`Duplicate hosted credential environment variable: ${environmentVariable}`);
+    }
+    names.add(name);
+    environmentVariables.add(environmentVariable);
+    return { name, reference, environmentVariable };
+  });
+}
+
+function parseCredentialReferenceNames(explicitValue, configuredReferences) {
+  const names = explicitValue
+    ? parseNameList(explicitValue, "PI_CLOUD_SMOKE_CREDENTIAL_REFERENCE_NAMES")
+    : [];
+  const configuredNames = new Set(configuredReferences.map((entry) => entry.name));
+  const seen = new Set();
+  for (const name of names) {
+    if (seen.has(name)) throw new Error(`Duplicate requested credential reference name: ${name}`);
+    seen.add(name);
+    if (!configuredNames.has(name)) throw new Error(`Unknown credential reference requested by smoke config: ${name}`);
+  }
+  return names;
+}
+
+function parseNameList(value, name) {
+  if (value.trim().startsWith("[")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      throw new Error(`${name} must be a comma-separated list or JSON array`);
+    }
+    if (!Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string" || entry.length === 0)) {
+      throw new Error(`${name} must contain only non-empty strings`);
+    }
+    return parsed;
+  }
+  return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+}
+
+function parseHostedCredentialValues(value, references) {
+  if (!value) {
+    if (references.length > 0) {
+      throw new Error(
+        `Missing PI_CLOUD_HOSTED_CREDENTIALS for configured hosted credential references: ${references.map((entry) => entry.name).join(", ")}`,
+      );
+    }
+    return { json: undefined, secrets: [] };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIALS must be a JSON object mapping reference strings to credential values");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIALS must be a JSON object mapping reference strings to credential values");
+  }
+  let credentialBytes = 0;
+  for (const [reference, credentialValue] of Object.entries(parsed)) {
+    if (reference.length === 0 || reference.length > 1024) {
+      throw new Error("PI_CLOUD_HOSTED_CREDENTIALS references must be 1-1024 characters");
+    }
+    if (typeof credentialValue !== "string" || credentialValue.length === 0 || credentialValue.length > 65_536) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS[${reference}] must be a 1-65536 character string`);
+    }
+    credentialBytes += Buffer.byteLength(credentialValue, "utf8");
+  }
+  if (credentialBytes > 65_536) throw new Error("PI_CLOUD_HOSTED_CREDENTIALS values exceed 65536 UTF-8 bytes");
+
+  const expectedReferences = new Set(references.map((entry) => entry.reference));
+  for (const reference of expectedReferences) {
+    if (!(reference in parsed)) throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS is missing configured reference: ${reference}`);
+  }
+  for (const reference of Object.keys(parsed)) {
+    if (!expectedReferences.has(reference)) {
+      throw new Error(`PI_CLOUD_HOSTED_CREDENTIALS contains a value without a configured reference: ${reference}`);
+    }
+  }
+  if (references.length === 0 && Object.keys(parsed).length > 0) {
+    throw new Error("PI_CLOUD_HOSTED_CREDENTIALS requires PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES");
+  }
+  return { json: references.length > 0 ? JSON.stringify(parsed) : undefined, secrets: Object.values(parsed) };
+}
+
+async function assertBuiltRuntime() {
+  const compose = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 15_000 });
+  if (compose.status !== 0) throw new Error("docker compose is required for isolated hosted smoke workers");
+  await Promise.all([
+    assertPathExists(apiAppEntry, "built API app entrypoint"),
+    assertPathExists(apiConfigEntry, "built API config entrypoint"),
+    assertPathExists(runnerEntry, "built hosted runner entrypoint"),
+  ]);
+}
+
+async function ensureRuntimeRoots(config) {
+  const roots = [config.workspaceRoots, config.sessionRoots]
+    .flatMap((value) => value.split(delimiter))
+    .filter(Boolean);
+  try {
+    await Promise.all(roots.map(async (root) => {
+      await mkdir(root, { recursive: true });
+      await chmod(root, 0o711);
+    }));
+  } catch (error) {
+    throw new Error(
+      `Unable to create hosted runtime roots (${roots.join(", ")}): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** Builds the runner image without blocking the event loop so termination signals stay responsive. */
+async function buildSmokeRunnerImage(config, onSpawn) {
+  await runDockerCommand(config, ["compose", "--project-name", config.composeProject, "build", "hosted-runner"], {
+    timeoutMs: 240_000,
+    failureMessage: "Unable to build isolated smoke runner image",
+    onSpawn,
+  });
+}
+
+/** Reserves the dedicated API port only now, immediately before startup, so the long image build cannot widen the port-reuse race. */
+async function reserveApiEndpoints(config) {
+  config.apiPort = await reserveUnusedLoopbackPort();
+  config.apiBaseUrl = parseUrl(`http://127.0.0.1:${config.apiPort}`, "generated API base URL");
+  config.runnerDispatcherUrl = parseUrl(`http://host.docker.internal:${config.apiPort}`, "container API base URL");
+}
+
+/** Fails before provisioning when the Docker CLI, Compose plugin, or daemon is unavailable. */
+function assertDockerAvailable() {
+  const docker = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8", timeout: 15_000 });
+  if (docker.error?.code === "ENOENT") {
+    throw new Error("Hosted runtime smoke requires the Docker CLI and Compose plugin");
+  }
+  if (docker.error) throw new Error(`Failed to check Docker: ${docker.error.message}`);
+  if (docker.status !== 0) {
+    throw new Error(
+      "Hosted runtime smoke requires a running Docker daemon. Start it on demand (for example, `colima start` on macOS), rerun the smoke command, then stop it with `colima stop`.",
+    );
+  }
+
+  const compose = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 15_000 });
+  if (compose.error) throw new Error(`Failed to check Docker Compose: ${compose.error.message}`);
+  if (compose.status !== 0) throw new Error("Hosted runtime smoke requires the Docker Compose plugin");
+}
+
+async function assertHostedAgentDirectory(root) {
+  for (const forbidden of [join(root, "auth.json"), join(root, "sessions")]) {
+    try {
+      await access(forbidden, fsConstants.F_OK);
+      throw new Error(`Hosted Pi resource directory contains forbidden persisted state: ${forbidden}`);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+
+  const inspect = async (path) => {
+    const stats = await lstat(path);
+    if (stats.isSymbolicLink()) throw new Error(`Hosted Pi resources must not contain symbolic links: ${path}`);
+    if (stats.isDirectory()) {
+      if ((stats.mode & 0o005) !== 0o005) {
+        throw new Error(`Hosted Pi resource directory is not readable and traversable by workspace UIDs: ${path}`);
+      }
+      for (const entry of await readdir(path)) await inspect(join(path, entry));
+      return;
+    }
+    if (stats.isFile() && (stats.mode & 0o004) !== 0o004) {
+      throw new Error(`Hosted Pi resource file is not readable by workspace UIDs: ${path}`);
+    }
+  };
+  await inspect(root);
+}
+
+async function inspectSmokeRuntime(config, workspaceRoot, nativeSessionFile) {
+  const source = `
+    import { access } from "node:fs/promises";
+    import { execFileSync } from "node:child_process";
+    const [workspaceRoot, nativeSessionFile, revision, repositoryUrl] = process.argv.slice(1);
+    await access(workspaceRoot);
+    await access(nativeSessionFile);
+    const git = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
+    const head = execFileSync("git", [...git, "-c", "safe.directory=*", "-C", workspaceRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const remote = execFileSync("git", [...git, "-c", "safe.directory=*", "-C", workspaceRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+    if (head.toLowerCase() !== revision.toLowerCase()) throw new Error("Smoke workspace revision mismatch");
+    if (new URL(remote).toString() !== new URL(repositoryUrl).toString()) throw new Error("Smoke workspace origin mismatch");
+  `;
+  await runSmokeComposeUtility(config, source, [workspaceRoot, nativeSessionFile, config.revision, config.repositoryUrl], "ro");
+}
+
+async function cleanupSmokeRuntimeFiles(config) {
+  const source = `
+    import { readdir, rm } from "node:fs/promises";
+    import { join } from "node:path";
+    const [root] = process.argv.slice(1);
+    for (const entry of await readdir(root)) await rm(join(root, entry), { recursive: true, force: true });
+  `;
+  await runSmokeComposeUtility(config, source, [config.workspaceRoots], "rw");
+}
+
+async function runSmokeComposeUtility(config, source, args, mountMode) {
+  const command = [
+    "compose",
+    "--project-name",
+    config.composeProject,
+    "run",
+    "--rm",
+    "--no-deps",
+    "--volume",
+    `${config.workspaceRoots}:${config.workspaceRoots}:${mountMode}`,
+    "--entrypoint",
+    "node",
+    "hosted-runner",
+    "--input-type=module",
+    "--eval",
+    source,
+    ...args,
+  ];
+  await runDockerCommand(config, command, { timeoutMs: 60_000, failureMessage: "Smoke utility failed" });
+}
+
+/** Runs one Docker CLI command to completion with bounded, redacted diagnostics; onSpawn exposes the child for termination. */
+async function runDockerCommand(config, args, { timeoutMs, failureMessage, onSpawn } = {}) {
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn("docker", args, {
+      cwd: process.cwd(),
+      env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    onSpawn?.(child);
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
+    child.stderr?.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolvePromise(undefined);
+    };
+    child.once("error", (error) => finish(error));
+    child.once("close", (code, signal) => finish(code === 0
+      ? undefined
+      : new Error(
+        `${failureMessage} (code=${String(code)} signal=${String(signal)}): ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
+      )));
+  });
+}
+
+async function cleanupSmokeResources({ config, clients, runners, api, composeTouched, runtimeFilesMayExist }) {
+  const errors = [];
+  const attempt = async (label, operation) => {
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  for (const client of clients) await attempt("close client", () => client.close());
+  for (const runner of runners) await attempt("stop runner", () => runner.stop());
+  await attempt("stop API", async () => api()?.stop());
+  if (composeTouched && runtimeFilesMayExist) {
+    await attempt("remove UID-owned runtime files", () => cleanupSmokeRuntimeFiles(config));
+  }
+  if (composeTouched) await attempt("remove Compose project", () => cleanupSmokeCompose(config));
+  await attempt("remove temporary control-plane root", () => rm(config.controlPlaneRoot, { recursive: true, force: true }));
+  if (errors.length > 0) throw new Error(`Hosted smoke cleanup failed: ${errors.join("; ")}`);
+}
+
+async function cleanupSmokeCompose(config) {
+  await runDockerCommand(
+    config,
+    ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"],
+    { failureMessage: "Unable to clean smoke Compose project" },
+  );
+}
+
+async function createWorkspace(config) {
+  return requestJson(config, {
+    method: "POST",
+    path: "/v1/workspaces",
+    token: config.userToken,
+    expectedStatus: 201,
+    headers: { "idempotency-key": `workspace-${randomUUID()}` },
+    body: {
+      repositoryUrl: config.repositoryUrl,
+      revision: config.revision,
+      projectTrust: config.projectTrust,
+      credentialReferenceNames: config.credentialReferenceNames,
+    },
+  });
+}
+
+async function getWorkspace(config, workspaceId) {
+  return requestJson(config, {
+    method: "GET",
+    path: `/v1/workspaces/${workspaceId}`,
+    token: config.userToken,
+    expectedStatus: 200,
+  });
+}
+
+async function createSession(config, workspaceId) {
+  return requestJson(config, {
+    method: "POST",
+    path: `/v1/workspaces/${workspaceId}/sessions`,
+    token: config.userToken,
+    expectedStatus: 201,
+    headers: { "idempotency-key": `session-${randomUUID()}` },
+    body: {},
+  });
+}
+
+async function getSession(config, sessionId) {
+  return requestJson(config, {
+    method: "GET",
+    path: `/v1/hosted-sessions/${sessionId}`,
+    token: config.userToken,
+    expectedStatus: 200,
+  });
+}
+
+async function startSession(config, sessionId) {
+  return requestJson(config, {
+    method: "POST",
+    path: `/v1/hosted-sessions/${sessionId}/start`,
+    token: config.userToken,
+    expectedStatus: 200,
+  });
+}
+
+async function stopSession(config, sessionId) {
+  return requestJson(config, {
+    method: "POST",
+    path: `/v1/hosted-sessions/${sessionId}/stop`,
+    token: config.userToken,
+    expectedStatus: 200,
+  });
+}
+
+async function archiveSession(config, sessionId) {
+  return requestJson(config, {
+    method: "POST",
+    path: `/v1/hosted-sessions/${sessionId}/archive`,
+    token: config.userToken,
+    expectedStatus: 200,
+  });
+}
+
+async function requestJson(config, options) {
+  const response = await fetch(new URL(options.path, config.apiBaseUrl), {
+    method: options.method,
+    headers: {
+      authorization: `Bearer ${options.token}`,
+      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+      ...(options.headers ?? {}),
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  if (response.status !== options.expectedStatus) {
+    throw new Error(`${options.method} ${options.path} failed with ${response.status}: ${await safeResponseText(response)}`);
+  }
+  if (options.expectedStatus === 204) return undefined;
+  return response.json();
+}
+
+async function safeResponseText(response) {
+  const text = await response.text();
+  return text.length === 0 ? response.statusText : text;
+}
+
+async function waitForSessionState(config, sessionId, states, timeoutMs, runner) {
+  return waitForSessionStateWithFetcher(() => getSession(config, sessionId), sessionId, states, timeoutMs, runner);
+}
+
+/** Polls hosted-session state and treats runner exit as failure only after checking the latest durable state. */
+async function waitForSessionStateWithFetcher(getSessionFn, sessionId, states, timeoutMs, runner) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const session = await getSessionFn();
+    if (states.includes(session.state)) return session;
+    if (runner?.exitInfo) {
+      throw new Error(`Hosted runner exited before session ${sessionId} reached ${states.join(", ")}: ${runner.describeExit()}`);
+    }
+    await delay(1_000);
+  }
+  throw new Error(`Timed out waiting for session ${sessionId} to reach ${states.join(", ")}`);
+}
+
+async function waitForNativeSession(config, sessionId, timeoutMs, runner) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (runner?.exitInfo) {
+      throw new Error(`Hosted runner exited before recording native session metadata: ${runner.describeExit()}`);
+    }
+    const session = await getSession(config, sessionId);
+    if (typeof session.nativeSessionId === "string" && typeof session.nativeSessionFile === "string") {
+      return { nativeSessionId: session.nativeSessionId, nativeSessionFile: session.nativeSessionFile };
+    }
+    await delay(1_000);
+  }
+  throw new Error(`Timed out waiting for native session metadata on hosted session ${sessionId}`);
+}
+
+function startHostedRunner(config, suffix) {
+  return new RunnerProcess(config, suffix);
+}
+
+function apiBootstrapSource() {
+  return `
+    import { buildApp } from ${JSON.stringify(pathToFileURL(apiAppEntry).href)};
+    import { readApiConfig } from ${JSON.stringify(pathToFileURL(apiConfigEntry).href)};
+    const app = await buildApp(readApiConfig(process.env));
+    const stop = async () => {
+      try {
+        await app.close();
+        process.exit(0);
+      } catch (error) {
+        console.error(error);
+        process.exit(1);
+      }
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    await app.listen({ host: "0.0.0.0", port: Number.parseInt(process.env.PORT ?? "0", 10) });
+  `;
+}
+
+/** Owns the dedicated built API child and exposes redacted, bounded failure diagnostics. */
+class ApiProcess {
+  constructor(config) {
+    this.config = config;
+    this.secrets = config.secrets;
+    this.stdout = "";
+    this.stderr = "";
+    this.exitInfo = undefined;
+    const childEnvironment = {
+      ...allowlistedHostEnvironment(process.env),
+      PATH: joinPath(nodeModulesBin, process.env.PATH ?? ""),
+      PORT: String(config.apiPort),
+      PI_CLOUD_PUBLIC_BASE_URL: config.runnerDispatcherUrl.toString(),
+      PI_CLOUD_DATABASE_PATH: config.databasePath,
+      PI_CLOUD_RUNTIME_WORKSPACE_ROOT: config.workspaceRoots,
+      PI_CLOUD_RUNTIME_AGENT_DIRECTORY: config.agentRoots,
+      PI_CLOUD_DISPATCHER_TOKEN: config.dispatcherToken,
+      PI_CLOUD_TASK_LEASE_PRIVATE_KEY: config.taskLeasePrivateKey,
+      PI_CLOUD_API_CREDENTIALS: config.apiCredentialsJson,
+      ...(config.hostedCredentialReferencesJson ? { PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES: config.hostedCredentialReferencesJson } : {}),
+      ...(config.hostedCredentialsJson ? { PI_CLOUD_HOSTED_CREDENTIALS: config.hostedCredentialsJson } : {}),
+    };
+    this.child = spawn(process.execPath, ["--input-type=module", "--eval", apiBootstrapSource()], {
+      cwd: process.cwd(),
+      env: childEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.child.stdout?.setEncoding("utf8");
+    this.child.stderr?.setEncoding("utf8");
+    this.child.stdout?.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr?.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
+    this.exitPromise = new Promise((resolve) => {
+      const settle = (info) => {
+        if (this.exitInfo) return;
+        this.exitInfo = info;
+        resolve(info);
+      };
+      this.child.once("error", (error) => settle({ code: null, signal: null, spawnError: error.message }));
+      this.child.once("exit", (code, signal) => settle({ code, signal }));
+    });
+  }
+
+  async waitForHealth(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (this.exitInfo) throw new Error(`Dedicated API exited before becoming healthy: ${this.describeExit()}`);
+      try {
+        const response = await fetch(new URL("/health", this.config.apiBaseUrl));
+        if (response.ok) return;
+      } catch {
+        // Retry until the child either listens, exits, or the deadline expires.
+      }
+      await delay(250);
+    }
+    throw new Error(`Timed out waiting for dedicated API health: ${this.describeExit()}`);
+  }
+
+  describeExit() {
+    const info = this.exitInfo;
+    const summary = info?.spawnError
+      ? `spawn failed: ${info.spawnError}`
+      : `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
+    const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
+    return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
+  }
+
+  async stop() {
+    if (this.exitInfo) return this.exitInfo;
+    this.child.kill("SIGTERM");
+    try {
+      return await withTimeout(this.exitPromise, 10_000, "Timed out stopping dedicated API process");
+    } catch {
+      this.child.kill("SIGKILL");
+      return this.exitPromise;
+    }
+  }
+}
+
+/** Owns one hosted runner worker child and reports redacted exit details to the smoke flow. */
+class RunnerProcess {
+  constructor(config, suffix) {
+    this.secrets = config.secrets;
+    this.stdout = "";
+    this.stderr = "";
+    this.exitInfo = undefined;
+    const childEnvironment = {
+      ...allowlistedHostEnvironment(process.env),
+      PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory,
+      PI_CLOUD_HOSTED_DISPATCHER_URL: config.runnerDispatcherUrl.toString(),
+      PI_CLOUD_HOSTED_DISPATCHER_TOKEN: config.dispatcherToken,
+      PI_CLOUD_RUNNER_ID: `${config.runnerIdBase}-${suffix}`,
+      PI_CLOUD_HOSTED_WORKSPACE_ROOTS: config.workspaceRoots,
+      PI_CLOUD_HOSTED_SESSION_ROOTS: config.sessionRoots,
+      PI_CLOUD_HOSTED_AGENT_ROOTS: config.agentRoots,
+      PI_CLOUD_HOSTED_PROCESS_ISOLATION: "workspace_uid",
+      PI_CLOUD_PI_EXECUTABLE: config.piExecutable,
+    };
+    const environmentNames = [
+      "PI_CLOUD_HOSTED_DISPATCHER_URL",
+      "PI_CLOUD_HOSTED_DISPATCHER_TOKEN",
+      "PI_CLOUD_RUNNER_ID",
+      "PI_CLOUD_HOSTED_WORKSPACE_ROOTS",
+      "PI_CLOUD_HOSTED_SESSION_ROOTS",
+      "PI_CLOUD_HOSTED_AGENT_ROOTS",
+      "PI_CLOUD_HOSTED_PROCESS_ISOLATION",
+      "PI_CLOUD_PI_EXECUTABLE",
+    ];
+    const args = [
+      "compose",
+      "--project-name",
+      config.composeProject,
+      "run",
+      "--rm",
+      "--no-deps",
+      "--volume",
+      `${config.workspaceRoots}:${config.workspaceRoots}`,
+      ...environmentNames.flatMap((name) => ["--env", name]),
+      "hosted-runner",
+      "node",
+      "packages/runner/dist/runner.js",
+    ];
+    this.child = spawn("docker", args, {
+      cwd: process.cwd(),
+      env: childEnvironment,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    this.child.stdout?.setEncoding("utf8");
+    this.child.stderr?.setEncoding("utf8");
+    this.child.stdout?.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr?.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
+    this.exitPromise = new Promise((resolve) => {
+      const settle = (info) => {
+        if (this.exitInfo) return;
+        this.exitInfo = info;
+        resolve(info);
+      };
+      this.child.once("error", (error) => settle({ code: null, signal: null, spawnError: error.message }));
+      this.child.once("exit", (code, signal) => settle({ code, signal }));
+    });
+  }
+
+  describeExit() {
+    const info = this.exitInfo;
+    const summary = info?.spawnError
+      ? `spawn failed: ${info.spawnError}`
+      : `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
+    const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
+    return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
+  }
+
+  async expectCleanExit(timeoutMs, context) {
+    const info = await withTimeout(this.exitPromise, timeoutMs, `Timed out waiting for ${context}`);
+    if (info.code !== 0) throw new Error(`${context} failed: ${this.describeExit()}`);
+    return info;
+  }
+
+  async stop() {
+    if (this.exitInfo) return this.exitInfo;
+    this.child.kill("SIGTERM");
+    try {
+      return await withTimeout(this.exitPromise, 10_000, "Timed out stopping hosted runner process");
+    } catch {
+      this.child.kill("SIGKILL");
+      return this.exitPromise;
+    }
+  }
+}
+
+async function openHostedClient(config, sessionId) {
+  const url = new URL(`/v1/hosted-sessions/${sessionId}/rpc`, config.apiBaseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const socket = await openWebSocket(url, config.userToken);
+  return new HostedClientConnection(socket, sessionId, config.secrets);
+}
+
+async function openWebSocket(url, token) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
+    const cleanup = () => {
+      socket.removeListener("open", onOpen);
+      socket.removeListener("error", onError);
+      socket.removeListener("unexpected-response", onUnexpectedResponse);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve(socket);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onUnexpectedResponse = async (_request, response) => {
+      cleanup();
+      reject(new Error(`WebSocket upgrade failed with ${response.statusCode}: ${await readIncomingMessage(response)}`));
+    };
+    socket.once("open", onOpen);
+    socket.once("error", onError);
+    socket.once("unexpected-response", onUnexpectedResponse);
+  });
+}
+
+/** Sends and receives one public hosted RPC client connection with per-request sequencing. */
+class HostedClientConnection {
+  constructor(socket, sessionId, secrets) {
+    this.socket = socket;
+    this.sessionId = sessionId;
+    this.secrets = secrets;
+    this.sequence = 0;
+    this.inboundSequence = 0;
+    this.queue = [];
+    this.waiters = [];
+    this.closed = undefined;
+
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        this.reject(new Error("Hosted client received an unexpected binary frame"));
+        return;
+      }
+      try {
+        const envelope = JSON.parse(String(data));
+        if (envelope?.version !== 1 || envelope.direction !== "pi_to_client") {
+          throw new Error("Hosted client received an invalid envelope version or direction");
+        }
+        if (!Number.isSafeInteger(envelope.sequence) || envelope.sequence < 1) {
+          throw new Error("Hosted client received an invalid envelope sequence");
+        }
+        if (envelope.sequence !== this.inboundSequence + 1) {
+          throw new Error("Hosted client received a non-contiguous envelope sequence");
+        }
+        if (!envelope.record || typeof envelope.record !== "object") {
+          throw new Error("Hosted client received an envelope without a native Pi record");
+        }
+        this.inboundSequence = envelope.sequence;
+        this.push(envelope);
+      } catch (error) {
+        this.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    socket.once("close", (code, reason) => {
+      this.closed = new Error(`Hosted client WebSocket closed (${code}): ${Buffer.from(reason).toString("utf8")}`);
+      this.reject(this.closed);
+    });
+    socket.once("error", (error) => {
+      this.closed = error;
+      this.reject(error);
+    });
+  }
+
+  send(record) {
+    const envelope = {
+      version: 1,
+      hostedSessionId: this.sessionId,
+      direction: "client_to_pi",
+      sequence: ++this.sequence,
+      record,
+    };
+    this.socket.send(JSON.stringify(envelope));
+  }
+
+  async next(timeoutMs) {
+    if (this.queue.length > 0) return this.queue.shift();
+    if (this.closed) throw this.closed;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((waiter) => waiter.reject !== reject);
+        reject(new Error(`Timed out waiting for hosted session envelope after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.waiters.push({
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+    });
+  }
+
+  async close() {
+    if (this.socket.readyState >= WebSocket.CLOSING) return;
+    await new Promise((resolve) => {
+      this.socket.once("close", () => resolve(undefined));
+      this.socket.close(1000, "smoke test reconnect");
+    });
+  }
+
+  push(value) {
+    if (this.waiters.length > 0) {
+      this.waiters.shift().resolve(value);
+      return;
+    }
+    this.queue.push(value);
+  }
+
+  reject(error) {
+    while (this.waiters.length > 0) this.waiters.shift().reject(error);
+  }
+}
+
+async function promptAndWait(client, sessionId, prompt, expectedMarker, timeoutMs) {
+  const requestId = `prompt-${randomUUID()}`;
+  client.send({ type: "prompt", id: requestId, message: prompt });
+  const deadline = Date.now() + timeoutMs;
+  let sawMessageEnd = false;
+  let sawSettled = false;
+  let messageText = "";
+
+  while (Date.now() < deadline) {
+    const envelope = await client.next(Math.max(1, deadline - Date.now()));
+    if (envelope?.hostedSessionId !== sessionId) throw new Error("Received a hosted envelope for the wrong session");
+    const record = envelope.record;
+    if (!record || typeof record !== "object") continue;
+    if (record.type === "response" && record.command === "prompt" && record.id === requestId && record.success === false) {
+      throw new Error(`Pi rejected the smoke prompt: ${JSON.stringify(record)}`);
+    }
+    if (record.type === "message_end") {
+      sawMessageEnd = true;
+      messageText = extractMessageText(record);
+    }
+    if (record.type === "agent_settled") sawSettled = true;
+    if (record.type === "error") throw new Error(`Pi returned an error record: ${JSON.stringify(record)}`);
+    if (sawMessageEnd && sawSettled) {
+      if (!messageText.includes(expectedMarker)) {
+        throw new Error(`Prompt completed without the expected marker. Final message: ${messageText}`);
+      }
+      return { messageText };
+    }
+  }
+
+  throw new Error("Timed out waiting for a finalized assistant message and agent_settled");
+}
+
+async function getState(client, sessionId, expectedNative, timeoutMs) {
+  const requestId = `state-${randomUUID()}`;
+  client.send({ type: "get_state", id: requestId });
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const envelope = await client.next(Math.max(1, deadline - Date.now()));
+    if (envelope?.hostedSessionId !== sessionId) throw new Error("Received a hosted envelope for the wrong session");
+    const record = envelope.record;
+    if (
+      record?.type === "response"
+      && record.command === "get_state"
+      && record.id === requestId
+      && record.success === true
+      && record.data
+      && typeof record.data.sessionId === "string"
+      && typeof record.data.sessionFile === "string"
+    ) {
+      if (record.data.sessionId !== expectedNative.nativeSessionId || record.data.sessionFile !== expectedNative.nativeSessionFile) {
+        throw new Error("Reconnected get_state returned different native session metadata");
+      }
+      return { sessionId: record.data.sessionId, sessionFile: record.data.sessionFile };
+    }
+    if (record?.type === "response" && record.command === "get_state" && record.id === requestId && record.success === false) {
+      throw new Error(`get_state failed after reconnect: ${JSON.stringify(record)}`);
+    }
+  }
+
+  throw new Error("Timed out waiting for get_state after reconnect");
+}
+
+async function getEntries(client, sessionId, initialPrompt, expectedMarker, timeoutMs) {
+  const requestId = `entries-${randomUUID()}`;
+  client.send({ type: "get_entries", id: requestId });
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const envelope = await client.next(Math.max(1, deadline - Date.now()));
+    if (envelope?.hostedSessionId !== sessionId) throw new Error("Received a hosted envelope for the wrong session");
+    const record = envelope.record;
+    if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === true) {
+      const entries = record.data?.entries;
+      if (!Array.isArray(entries)) throw new Error("Reconnected get_entries returned no entry array");
+      const hasInitialPrompt = entries.some((entry) =>
+        entry?.type === "message" && entry.message?.role === "user" && sessionEntryText(entry) === initialPrompt,
+      );
+      if (!hasInitialPrompt) throw new Error("Reconnected get_entries did not contain the exact initial user prompt");
+      const hasAssistantMarker = entries.some((entry) =>
+        entry?.type === "message"
+        && entry.message?.role === "assistant"
+        && sessionEntryText(entry).includes(expectedMarker),
+      );
+      if (!hasAssistantMarker) throw new Error("Reconnected get_entries had no assistant entry with the expected marker");
+      return { entryCount: entries.length };
+    }
+    if (record?.type === "response" && record.command === "get_entries" && record.id === requestId && record.success === false) {
+      throw new Error(`get_entries failed after reconnect: ${JSON.stringify(record)}`);
+    }
+    if (record?.type === "error") throw new Error(`Pi returned an error record after reconnect: ${JSON.stringify(record)}`);
+  }
+
+  throw new Error("Timed out waiting for get_entries after reconnect");
+}
+
+function sessionEntryText(entry) {
+  const content = entry?.message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+}
+
+function extractMessageText(record) {
+  const content = Array.isArray(record?.message?.content) ? record.message.content : [];
+  const text = content
+    .filter((part) => part && typeof part === "object" && part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+  return text || JSON.stringify(record.message ?? record);
+}
+
+async function assertPathExists(path, label) {
+  await access(path, fsConstants.F_OK).catch(() => {
+    throw new Error(`Missing ${label}: ${path}`);
+  });
+}
+
+function parseUrl(value, sourceName) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${sourceName} must be an absolute URL`);
+  }
+  return new URL(url.toString().replace(/\/+$/u, "") + "/");
+}
+
+function required(value, name) {
+  if (!value) throw new Error(`Missing ${name}`);
+  return value;
+}
+
+function parseProjectTrust(value) {
+  if (value === undefined || value === "untrusted") return "untrusted";
+  if (value === "trusted") {
+    throw new Error("Trusted-project smoke requires the container runtime and is not supported by this host process");
+  }
+  throw new Error("PI_CLOUD_SMOKE_PROJECT_TRUST must be untrusted");
+}
+
+function joinPath(prefix, existing) {
+  return existing ? `${prefix}${delimiter}${existing}` : prefix;
+}
+
+async function reserveUnusedLoopbackPort() {
+  const server = createServer();
+  await new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolvePromise);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : undefined;
+  await new Promise((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise(undefined)));
+  if (!port) throw new Error("Unable to reserve an unused loopback port");
+  return port;
+}
+
+function generateTaskLeasePrivateKey() {
+  const { privateKey } = generateKeyPairSync("ed25519");
+  return privateKey.export({ format: "der", type: "pkcs8" }).toString("base64");
+}
+
+function randomToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+function allowlistedHostEnvironment(environment) {
+  const allowedNames = [
+    "DOCKER_API_VERSION",
+    "DOCKER_CERT_PATH",
+    "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+    "DOCKER_HOST",
+    "DOCKER_TLS",
+    "DOCKER_TLS_VERIFY",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "NO_PROXY",
+    "PATH",
+    "SHELL",
+    "TEMP",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "USER",
+    "XDG_RUNTIME_DIR",
+  ];
+  return Object.fromEntries(
+    allowedNames.flatMap((name) => environment[name] === undefined ? [] : [[name, environment[name]]]),
+  );
+}
+
+async function readIncomingMessage(stream) {
+  let body = "";
+  for await (const chunk of stream) body += chunk;
+  return body || stream.statusMessage || "no response body";
+}
+
+/** Retains enough diagnostic tail to redact whole configured secrets even when output is chunked. */
+function appendBoundedDiagnostic(current, chunk, secrets = []) {
+  const longestSecretBytes = secrets
+    .filter(Boolean)
+    .reduce((maximum, secret) => Math.max(maximum, Buffer.byteLength(secret)), 0);
+  return boundedUtf8Tail(current + String(chunk), maxDiagnosticBytes + longestSecretBytes);
+}
+
+/** Redacts configured secret strings from a bounded diagnostic before exposing it to callers. */
+function redactBoundedDiagnostic(text, secrets) {
+  const redacted = [...secrets]
+    .filter(Boolean)
+    .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left))
+    .reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
+  return boundedUtf8Tail(redacted, maxDiagnosticBytes);
+}
+
+function boundedUtf8Tail(text, maxBytes) {
+  const encoded = Buffer.from(text);
+  if (encoded.byteLength <= maxBytes) return encoded.toString("utf8");
+  let start = encoded.byteLength - maxBytes;
+  while (start < encoded.byteLength && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
+}
+
+function delay(milliseconds) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export { appendBoundedDiagnostic, redactBoundedDiagnostic, waitForSessionStateWithFetcher };
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
+}

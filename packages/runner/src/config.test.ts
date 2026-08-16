@@ -56,12 +56,13 @@ test("runner refuses missing, tampered, and expired task leases", () => {
   assert.throws(() => readTaskLease(createConfig(), new Date("2026-08-12T09:01:01Z")), /expired/);
 });
 
-test("runner accepts HTTPS everywhere and loopback HTTP only for the control plane", () => {
+test("runner accepts HTTPS everywhere and HTTP only for local development hosts", () => {
   assert.equal(parseControlPlaneUrl("https://control.pi-cloud.test").protocol, "https:");
   assert.equal(parseControlPlaneUrl("http://127.0.0.1:3000").origin, "http://127.0.0.1:3000");
   assert.equal(parseControlPlaneUrl("http://localhost:3000").origin, "http://localhost:3000");
   assert.equal(parseControlPlaneUrl("http://[::1]:3000").origin, "http://[::1]:3000");
-  assert.throws(() => parseControlPlaneUrl("http://example.com:3000"), /loopback HTTP/);
+  assert.equal(parseControlPlaneUrl("http://host.docker.internal:3000").origin, "http://host.docker.internal:3000");
+  assert.throws(() => parseControlPlaneUrl("http://example.com:3000"), /local development HTTP/);
 });
 
 test("runner refuses a lease issued for another pool", () => {

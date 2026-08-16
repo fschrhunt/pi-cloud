@@ -144,7 +144,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
         maxRecordBytes: launch.limits.maxRecordBytes,
         maxCumulativeBytes: launch.limits.maxCumulativeBytes,
         cumulativeBytes: inboundCumulativeBytes,
-      });
+      }, raw.byteLength);
       inboundCumulativeBytes = bounded.cumulativeBytes;
       if (bounded.envelope.hostedSessionId !== launch.hostedSessionId) {
         throw new Error("RPC envelope is for a different hosted session");
@@ -195,13 +195,14 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
           record,
         };
         try {
+          const serialized = JSON.stringify(envelope);
           const bounded = parseBoundedHostedRpcEnvelope(envelope, {
             maxRecordBytes: launch.limits.maxRecordBytes,
             maxCumulativeBytes: launch.limits.maxCumulativeBytes,
             cumulativeBytes: outboundCumulativeBytes,
-          });
+          }, Buffer.byteLength(serialized, "utf8"));
           outboundCumulativeBytes = bounded.cumulativeBytes;
-          socket.send(JSON.stringify(bounded.envelope));
+          socket.send(serialized);
         } catch {
           socket.close(1009, "outbound RPC limit exceeded");
         }

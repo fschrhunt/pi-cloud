@@ -331,3 +331,82 @@ test("a tunnel upgrade cannot attach after its assignment was stopped", () => {
   assert.equal(controlPlane.router.hasRuntime(session.id), false);
   assert.deepEqual(closes, [{ code: 4410, reason: "hosted runtime assignment is no longer active" }]);
 });
+
+test("a stopped runtime that keeps heartbeating is force-closed after the stop grace period", () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { controlPlane, store } = newControlPlane({}, () => now);
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-stop-deadline",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-stop-deadline");
+  const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-1" });
+  assert.ok(claimed);
+  const assignment = controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token);
+
+  let onMessage: ((data: Buffer, isBinary: boolean) => void) | undefined;
+  const closes: Array<{ code: number; reason: string }> = [];
+  controlPlane.router.attachRuntime({
+    sessionId: session.id,
+    assignmentId: assignment.assignmentId,
+    workspaceRoot: workspace.root,
+    limits: config().hostedLaunchLimits,
+    socket: {
+      readyState: 1,
+      send: () => undefined,
+      on: (event: string, handler: (data: Buffer, isBinary: boolean) => void) => {
+        if (event === "message") onMessage = handler;
+      },
+      once: () => undefined,
+      close: (code: number, reason: string) => closes.push({ code, reason }),
+    } as never,
+  });
+  store.markHostedSessionRunning(session.id, now);
+  controlPlane.stopHostedSession(principal, session.id);
+  assert.ok(onMessage);
+  const heartbeat = Buffer.from(JSON.stringify({ type: "pi_cloud_runtime_heartbeat" }));
+
+  now = new Date("2026-01-01T00:00:40.000Z");
+  onMessage(heartbeat, false);
+  controlPlane.router.sweepRuntimeHeartbeats();
+  assert.equal(controlPlane.router.hasRuntime(session.id), true);
+
+  now = new Date("2026-01-01T00:01:10.000Z");
+  onMessage(heartbeat, false);
+  controlPlane.router.sweepRuntimeHeartbeats();
+  assert.equal(controlPlane.router.hasRuntime(session.id), false);
+  assert.deepEqual(closes, [{ code: 4410, reason: "hosted runtime did not stop within the grace period" }]);
+  assert.equal(controlPlane.archiveHostedSession(principal, session.id).state, "archived");
+});
+
+test("a stopped sibling session cannot start while the workspace runtime is still draining", () => {
+  const { controlPlane, store } = newControlPlane();
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-start-drain",
+  );
+  const sessionA = controlPlane.createHostedSession(principal, workspace.id, {}, "session-start-drain-a");
+  assert.ok(controlPlane.claimHostedRuntime({ runnerId: "runner-a" }));
+  controlPlane.stopHostedSession(principal, sessionA.id);
+
+  const sessionB = controlPlane.createHostedSession(principal, workspace.id, {}, "session-start-drain-b");
+  const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-b" });
+  assert.ok(claimed);
+  const assignment = controlPlane.authorizeRuntimeAssignment(sessionB.id, claimed.tunnel.token);
+  controlPlane.router.attachRuntime({
+    sessionId: sessionB.id,
+    assignmentId: assignment.assignmentId,
+    workspaceRoot: workspace.root,
+    limits: config().hostedLaunchLimits,
+    socket: { readyState: 1, send: () => undefined, on: () => undefined, once: () => undefined } as never,
+  });
+  store.markHostedSessionRunning(sessionB.id, new Date());
+  controlPlane.stopHostedSession(principal, sessionB.id);
+
+  assert.throws(
+    () => controlPlane.startHostedSession(principal, sessionA.id),
+    /Workspace runtime is still stopping/,
+  );
+});

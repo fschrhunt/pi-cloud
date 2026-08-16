@@ -49,6 +49,7 @@ type RuntimeConnection = {
   inboundSequence: number;
   inboundCumulativeBytes: number;
   lastHeartbeatAt: number;
+  stopDeadlineAt?: number;
   heartbeatTimer?: NodeJS.Timeout;
   client?: ClientConnection;
 };
@@ -106,20 +107,32 @@ export class HostedRpcRouter {
     this.runtimes.clear();
   }
 
-  /** Stops client mutation immediately, then asks the runtime to perform its bounded process shutdown. */
+  /**
+   * Stops client mutation immediately, then asks the runtime to perform its bounded process
+   * shutdown. A runtime that keeps its tunnel open past the termination grace plus one heartbeat
+   * window is force-closed by the sweep, so a wedged worker cannot hold the session or its
+   * workspace hostage.
+   */
   sendStopControl(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId);
     if (!runtime) return;
     const client = runtime.client;
     runtime.client = undefined;
     closeIfOpen(client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted session stopped");
+    runtime.stopDeadlineAt ??= this.clock().getTime()
+      + runtime.limits.terminationGraceSeconds * 1_000
+      + this.heartbeatTimeoutMs;
     if (runtime.socket.readyState === websocketOpen) runtime.socket.send(stopControlMessage);
   }
 
-  /** Closes runtime tunnels that stopped sending authenticated activity or heartbeat controls. */
+  /** Closes runtime tunnels that stopped heartbeating or that outstayed their stop deadline. */
   sweepRuntimeHeartbeats(): void {
     const now = this.clock().getTime();
     for (const runtime of this.runtimes.values()) {
+      if (runtime.stopDeadlineAt !== undefined && now >= runtime.stopDeadlineAt) {
+        this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime did not stop within the grace period");
+        continue;
+      }
       if (now - runtime.lastHeartbeatAt <= this.heartbeatTimeoutMs) continue;
       this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
     }

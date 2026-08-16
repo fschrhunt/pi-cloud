@@ -50,7 +50,7 @@ Internal worker endpoints:
 - `POST /internal/v1/hosted-runtimes/claim`
 - `GET /internal/v1/hosted-sessions/:sessionId/tunnel` authenticated internal WebSocket
 
-A new hosted session starts in `queued`. Claiming it moves the durable state to `starting`; the worker then connects the internal tunnel, sends `pi_cloud_runtime_ready`, and the API marks it `running`. `stop` durably marks the session stopped, revokes the assignment, and sends an out-of-band `pi_cloud_stop` control. A replacement cannot start until the old runtime tunnel closes. `start` then re-queues the stopped session for another claim.
+A new hosted session starts in `queued`. Claiming it moves the durable state to `starting`; the worker then connects the internal tunnel, sends `pi_cloud_runtime_ready`, and the API marks it `running`. `stop` durably marks the session stopped, revokes the assignment, and sends an out-of-band `pi_cloud_stop` control. A replacement cannot start anywhere in the workspace until the old runtime tunnel closes; a tunnel that outstays `terminationGraceSeconds` plus the heartbeat window after `stop` is force-closed. `start` then re-queues the stopped session for another claim.
 
 ## Version 1 launch contract
 

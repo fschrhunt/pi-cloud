@@ -93,7 +93,14 @@ export class HostedControlPlane {
     if (this.router.hasRuntime(sessionId)) {
       throw conflict("session_runtime_active", "Hosted session runtime is still stopping");
     }
-    return this.store.startHostedSession(principal.id, sessionId, this.clock());
+    const session = this.store.requireHostedSession(principal.id, sessionId);
+    const workspace = this.store.requireWorkspace(principal.id, session.workspaceId);
+    return this.store.startHostedSession(
+      principal.id,
+      sessionId,
+      this.clock(),
+      this.router.hasRuntimeForWorkspace(workspace.root),
+    );
   }
 
   stopHostedSession(principal: Principal, sessionId: string): HostedSession {

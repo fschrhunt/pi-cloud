@@ -117,22 +117,6 @@ npm run build
 npm test
 ```
 
-Run the hosted runtime smoke flow against a dedicated temporary API and a real HTTPS repository revision:
-
-```bash
-npm run smoke:hosted
-```
-
-It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and a sanitized, non-secret Pi resource directory readable by isolated workspace UIDs. The command removes its temporary API database, containers, volumes, and runtime roots after success, failure, or termination signals.
-
-On macOS, start Colima on demand before the smoke test and stop it afterward:
-
-```bash
-colima start
-npm run smoke:hosted
-colima stop
-```
-
 ## Repository
 
 ```text

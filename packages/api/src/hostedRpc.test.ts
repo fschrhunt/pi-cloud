@@ -43,8 +43,8 @@ type Fixture = {
   workspaceRoot: string;
 };
 
-async function setup(): Promise<Fixture> {
-  const app = await buildApp(config());
+async function setup(clock?: () => Date): Promise<Fixture> {
+  const app = await buildApp(config(), clock);
   const address = await app.listen({ host: "127.0.0.1", port: 0 });
   const port = Number(new URL(address).port);
 
@@ -78,8 +78,8 @@ async function claim(app: Fixture["app"]): Promise<{ launch: { hostedSessionId: 
   return response.json();
 }
 
-function connectRuntime(fixture: Fixture, token: string): WebSocket {
-  return new WebSocket(`ws://127.0.0.1:${fixture.port}/internal/v1/hosted-sessions/${fixture.sessionId}/tunnel`, {
+function connectRuntime(fixture: Fixture, token: string, sessionId = fixture.sessionId): WebSocket {
+  return new WebSocket(`ws://127.0.0.1:${fixture.port}/internal/v1/hosted-sessions/${sessionId}/tunnel`, {
     headers: { authorization: `Bearer ${token}` },
   });
 }
@@ -88,6 +88,13 @@ function connectClient(fixture: Fixture, token: string): WebSocket {
   return new WebSocket(`ws://127.0.0.1:${fixture.port}/v1/hosted-sessions/${fixture.sessionId}/rpc`, {
     headers: { authorization: `Bearer ${token}` },
   });
+}
+
+function connectBrowserClient(fixture: Fixture, ticket: string, sessionId = fixture.sessionId): WebSocket {
+  return new WebSocket(
+    `ws://127.0.0.1:${fixture.port}/v1/hosted-sessions/${sessionId}/rpc`,
+    [`pi-cloud-ticket.${ticket}`, "pi-cloud-rpc"],
+  );
 }
 
 function waitFor<Args extends unknown[]>(socket: WebSocket, event: "open" | "message" | "close" | "unexpected-response"): Promise<Args> {
@@ -207,8 +214,9 @@ test("hosted RPC tunnel routes an authenticated prompt to the runtime and its re
   assert.equal(forwardedGetEntries.sequence, 2); // the tunnel's own sequence continues across client reconnects
   assert.deepEqual(forwardedGetEntries.record, { id: "req-2", type: "get_entries" });
 
-  // Stop sends a distinct out-of-band control frame, separate from any sequenced envelope.
+  // Stop drops client mutation immediately and sends a distinct out-of-band runtime control frame.
   const stopControl = nextMessage(runtime);
+  const clientClosed = waitFor<[number]>(reconnected, "close");
   const stopped = await app.inject({
     method: "POST",
     url: `/v1/hosted-sessions/${sessionId}/stop`,
@@ -216,17 +224,100 @@ test("hosted RPC tunnel routes an authenticated prompt to the runtime and its re
   });
   assert.equal(stopped.json().state, "stopped");
   assert.deepEqual(await stopControl, { type: "pi_cloud_stop" });
+  assert.equal((await clientClosed)[0], 4410);
 
-  // A runtime disconnect (following the stop control) marks the session stopped and drops the client.
+  // A runtime disconnect following the stop control leaves the session stopped.
   runtime.close();
-  const [closeCode] = await waitFor<[number]>(reconnected, "close");
-  assert.equal(closeCode, 4410);
   await delay(20);
   const finalState = (
     await app.inject({ method: "GET", url: `/v1/hosted-sessions/${sessionId}`, headers: { authorization: `Bearer ${ownerToken}` } })
   ).json();
   assert.equal(finalState.state, "stopped");
 
+  await app.close();
+});
+
+test("browser clients attach with a non-cacheable, short-lived, single-use WebSocket ticket", async () => {
+  const fixture = await setup();
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const forbiddenTicket = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${otherToken}` },
+  });
+  assert.equal(forbiddenTicket.statusCode, 404);
+
+  const ticketResponse = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(ticketResponse.statusCode, 201);
+  assert.equal(ticketResponse.headers["cache-control"], "no-store");
+  const ticket = ticketResponse.json<{ ticket: string; expiresAt: string }>();
+  assert.match(ticket.ticket, /^[A-Za-z0-9_-]{43}$/u);
+  assert.ok(Date.parse(ticket.expiresAt) > Date.now());
+
+  const bogusTicket = connectBrowserClient(fixture, "x".repeat(43));
+  const [, bogusResponse] = await waitFor<[unknown, { statusCode: number }]>(bogusTicket, "unexpected-response");
+  assert.equal(bogusResponse.statusCode, 401);
+
+  const crossSessionTicket = connectBrowserClient(fixture, ticket.ticket, "00000000-0000-0000-0000-000000000000");
+  const [, crossSessionResponse] = await waitFor<[unknown, { statusCode: number }]>(crossSessionTicket, "unexpected-response");
+  assert.equal(crossSessionResponse.statusCode, 401);
+
+  const browserClient = connectBrowserClient(fixture, ticket.ticket);
+  await waitFor(browserClient, "open");
+  assert.equal(browserClient.protocol, "pi-cloud-rpc");
+  browserClient.close();
+  await waitFor(browserClient, "close");
+
+  const reusedTicket = connectBrowserClient(fixture, ticket.ticket);
+  const [, reusedResponse] = await waitFor<[unknown, { statusCode: number }]>(reusedTicket, "unexpected-response");
+  assert.equal(reusedResponse.statusCode, 401);
+
+  await closeAll(runtime);
+  await app.close();
+});
+
+test("browser attachment tickets expire at their stated boundary and newer tickets revoke older ones", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const fixture = await setup(() => now);
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const issueTicket = async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    assert.equal(response.statusCode, 201);
+    return response.json<{ ticket: string }>().ticket;
+  };
+  const revokedTicket = await issueTicket();
+  const expiringTicket = await issueTicket();
+
+  const revoked = connectBrowserClient(fixture, revokedTicket);
+  const [, revokedResponse] = await waitFor<[unknown, { statusCode: number }]>(revoked, "unexpected-response");
+  assert.equal(revokedResponse.statusCode, 401);
+
+  now = new Date("2026-01-01T00:01:00.000Z");
+  const expired = connectBrowserClient(fixture, expiringTicket);
+  const [, expiredResponse] = await waitFor<[unknown, { statusCode: number }]>(expired, "unexpected-response");
+  assert.equal(expiredResponse.statusCode, 401);
+
+  await closeAll(runtime);
   await app.close();
 });
 
@@ -259,8 +350,52 @@ test("hosted RPC endpoints isolate owners and reject invalid or unscoped tokens"
   const badTunnel = connectRuntime(fixture, "wrong-token");
   const [, badTunnelResponse] = await waitFor<[unknown, { statusCode: number }]>(badTunnel, "unexpected-response");
   assert.equal(badTunnelResponse.statusCode, 401);
+  const unknownTunnel = connectRuntime(fixture, "wrong-token", "00000000-0000-0000-0000-000000000000");
+  const [, unknownTunnelResponse] = await waitFor<[unknown, { statusCode: number }]>(unknownTunnel, "unexpected-response");
+  assert.equal(unknownTunnelResponse.statusCode, 401);
 
   await closeAll(runtime, client);
+  await app.close();
+});
+
+test("a runtime policy failure rejects already-queued frames before they can persist metadata", async () => {
+  const fixture = await setup();
+  const { app, sessionId, workspaceRoot } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+
+  runtime.send(JSON.stringify({ not: "an envelope" }));
+  runtime.send(
+    JSON.stringify({
+      version: 1,
+      hostedSessionId: sessionId,
+      direction: "pi_to_client",
+      sequence: 1,
+      record: {
+        id: "pi-cloud-internal-startup-state",
+        type: "response",
+        command: "get_state",
+        success: true,
+        data: {
+          sessionId: "must-not-persist",
+          sessionFile: `${workspaceRoot.slice(0, -"/repository".length)}/native-sessions/${sessionId}/late.jsonl`,
+        },
+      },
+    }),
+  );
+  const [closeCode] = await waitFor<[number]>(runtime, "close");
+  assert.equal(closeCode, 4400);
+
+  const persisted = await app.inject({
+    method: "GET",
+    url: `/v1/hosted-sessions/${sessionId}`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(persisted.json().state, "stopped");
+  assert.equal(persisted.json().nativeSessionId, null);
+  assert.equal(persisted.json().nativeSessionFile, null);
+
   await app.close();
 });
 
@@ -301,8 +436,17 @@ test("hosted RPC tunnel enforces strict sequence, byte, and session-scoping poli
   );
   assert.equal(crossSessionCode, 4404);
 
-  const malformedCode = await expectPolicyClose((socket) => socket.send(JSON.stringify({ not: "an envelope" })));
+  let forwardedAfterViolation = false;
+  runtime.once("message", () => { forwardedAfterViolation = true; });
+  const malformedCode = await expectPolicyClose((socket) => {
+    socket.send(JSON.stringify({ not: "an envelope" }));
+    socket.send(
+      JSON.stringify({ version: 1, hostedSessionId: sessionId, direction: "client_to_pi", sequence: 1, record: { type: "get_state", id: "late" } }),
+    );
+  });
   assert.equal(malformedCode, 4400);
+  await delay(20);
+  assert.equal(forwardedAfterViolation, false);
 
   const binaryCode = await expectPolicyClose((socket) => socket.send(Buffer.from([1, 2, 3])));
   assert.equal(binaryCode, 4400);

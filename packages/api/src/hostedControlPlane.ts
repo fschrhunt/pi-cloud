@@ -33,6 +33,7 @@ type ClientAttachmentTicket = {
 export class HostedControlPlane {
   readonly router: HostedRpcRouter;
   private readonly clientTickets = new Map<string, ClientAttachmentTicket>();
+  private readonly clientTicketDigestsBySession = new Map<string, string>();
 
   constructor(
     private readonly config: ApiConfig,
@@ -106,9 +107,12 @@ export class HostedControlPlane {
   issueClientTicket(principal: Principal, sessionId: string): { ticket: string; expiresAt: string } {
     this.authorizeClientConnection(principal, sessionId);
     this.sweepClientTickets();
+    this.revokeClientTicketForSession(sessionId);
     const ticket = randomBytes(32).toString("base64url");
     const expiresAt = new Date(this.clock().getTime() + clientTicketLifetimeMs);
-    this.clientTickets.set(tokenDigest(ticket), { sessionId, expiresAt, principal });
+    const digest = tokenDigest(ticket);
+    this.clientTickets.set(digest, { sessionId, expiresAt, principal });
+    this.clientTicketDigestsBySession.set(sessionId, digest);
     return { ticket, expiresAt: expiresAt.toISOString() };
   }
 
@@ -119,21 +123,35 @@ export class HostedControlPlane {
     const digest = tokenDigest(parsedTicket.data);
     const issued = this.clientTickets.get(digest);
     if (!issued || issued.sessionId !== sessionId) throw unauthorized();
-    this.clientTickets.delete(digest);
+    this.deleteClientTicketDigest(digest);
     if (issued.expiresAt.getTime() < this.clock().getTime()) throw unauthorized();
     return this.authorizeClientConnection(issued.principal, sessionId);
+  }
+
+  private revokeClientTicketForSession(sessionId: string): void {
+    const digest = this.clientTicketDigestsBySession.get(sessionId);
+    if (digest) this.deleteClientTicketDigest(digest);
+  }
+
+  private deleteClientTicketDigest(digest: string): void {
+    const ticket = this.clientTickets.get(digest);
+    this.clientTickets.delete(digest);
+    if (ticket && this.clientTicketDigestsBySession.get(ticket.sessionId) === digest) {
+      this.clientTicketDigestsBySession.delete(ticket.sessionId);
+    }
   }
 
   private sweepClientTickets(): void {
     const now = this.clock().getTime();
     for (const [digest, ticket] of this.clientTickets) {
-      if (ticket.expiresAt.getTime() < now) this.clientTickets.delete(digest);
+      if (ticket.expiresAt.getTime() < now) this.deleteClientTicketDigest(digest);
     }
   }
 
   /** Closes ephemeral routed sockets and discards attachment tickets before the durable store is shut down. */
   close(): void {
     this.clientTickets.clear();
+    this.clientTicketDigestsBySession.clear();
     this.router.close();
   }
 

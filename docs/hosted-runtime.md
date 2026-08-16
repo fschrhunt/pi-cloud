@@ -104,7 +104,7 @@ Public client:
 - endpoint: `GET /v1/hosted-sessions/:sessionId/rpc`
 - non-browser auth: normal API bearer token in `Authorization`
 - browser auth: mint a ticket with an authenticated `POST /v1/hosted-sessions/:sessionId/rpc-ticket`, then open the WebSocket with subprotocols `pi-cloud-rpc` and `pi-cloud-ticket.<ticket>`
-- ticket policy: random, single-use, valid for 60 seconds, and scoped to one hosted session
+- ticket policy: random, single-use, valid for 60 seconds, scoped to one hosted session, and one outstanding ticket per session
 - policy: one active client per hosted session
 
 The browser flow keeps bearer credentials out of WebSocket URLs and works with the native browser `WebSocket` API:

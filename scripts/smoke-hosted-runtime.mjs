@@ -489,8 +489,8 @@ async function runSmokeComposeUtility(config, source, args, mountMode) {
     let stderr = "";
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk); });
-    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk); });
+    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
+    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
     let settled = false;
     const finish = (error) => {
@@ -502,7 +502,9 @@ async function runSmokeComposeUtility(config, source, args, mountMode) {
     child.once("error", (error) => finish(error));
     child.once("close", (code, signal) => finish(code === 0
       ? undefined
-      : new Error(`Smoke utility failed with code=${String(code)} signal=${String(signal)}: ${stderr.trim() || stdout.trim()}`)));
+      : new Error(
+        `Smoke utility failed with code=${String(code)} signal=${String(signal)}: ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
+      )));
   });
 }
 
@@ -538,8 +540,8 @@ async function cleanupSmokeCompose(config) {
     let settled = false;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk); });
-    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk); });
+    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
+    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
     const finish = (error) => {
       if (settled) return;
       settled = true;
@@ -548,7 +550,9 @@ async function cleanupSmokeCompose(config) {
     child.once("error", (error) => finish(error));
     child.once("close", (code, signal) => finish(code === 0
       ? undefined
-      : new Error(`Unable to clean smoke Compose project (code=${String(code)} signal=${String(signal)}): ${stderr.trim() || stdout.trim()}`)));
+      : new Error(
+        `Unable to clean smoke Compose project (code=${String(code)} signal=${String(signal)}): ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
+      )));
   });
 }
 
@@ -647,13 +651,18 @@ async function safeResponseText(response) {
 }
 
 async function waitForSessionState(config, sessionId, states, timeoutMs, runner) {
+  return waitForSessionStateWithFetcher(() => getSession(config, sessionId), sessionId, states, timeoutMs, runner);
+}
+
+/** Polls hosted-session state and treats runner exit as failure only after checking the latest durable state. */
+async function waitForSessionStateWithFetcher(getSessionFn, sessionId, states, timeoutMs, runner) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    const session = await getSessionFn();
+    if (states.includes(session.state)) return session;
     if (runner?.exitInfo) {
       throw new Error(`Hosted runner exited before session ${sessionId} reached ${states.join(", ")}: ${runner.describeExit()}`);
     }
-    const session = await getSession(config, sessionId);
-    if (states.includes(session.state)) return session;
     await delay(1_000);
   }
   throw new Error(`Timed out waiting for session ${sessionId} to reach ${states.join(", ")}`);
@@ -1195,13 +1204,15 @@ async function readIncomingMessage(stream) {
   return body || stream.statusMessage || "no response body";
 }
 
-function appendBoundedDiagnostic(current, chunk, secrets) {
+/** Retains enough diagnostic tail to redact whole configured secrets even when output is chunked. */
+function appendBoundedDiagnostic(current, chunk, secrets = []) {
   const longestSecretBytes = secrets
     .filter(Boolean)
     .reduce((maximum, secret) => Math.max(maximum, Buffer.byteLength(secret)), 0);
   return boundedUtf8Tail(current + String(chunk), maxDiagnosticBytes + longestSecretBytes);
 }
 
+/** Redacts configured secret strings from a bounded diagnostic before exposing it to callers. */
 function redactBoundedDiagnostic(text, secrets) {
   const redacted = [...secrets]
     .filter(Boolean)
@@ -1236,9 +1247,13 @@ async function withTimeout(promise, timeoutMs, message) {
   }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+export { appendBoundedDiagnostic, redactBoundedDiagnostic, waitForSessionStateWithFetcher };
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }

@@ -16,7 +16,7 @@
     "dev:api": "npm run dev --workspace=@pi-cloud/api",
     "dev:runner": "npm run dev --workspace=@pi-cloud/runner",
     "smoke:hosted": "node --env-file-if-exists=.env scripts/smoke-hosted-runtime.mjs",
-    "test": "npm run test --workspaces --if-present"
+    "test": "node --test scripts/*.test.mjs && npm run test --workspaces --if-present"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

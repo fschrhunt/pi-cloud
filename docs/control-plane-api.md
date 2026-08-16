@@ -27,6 +27,21 @@ Create operations require an `Idempotency-Key` header (8–200 characters).
 
 Agent creation records the authenticated creator/requester, API origin, exact repository revision, environment target, runner pool, and timestamps. The API stores metadata only; it never clones or loads repository content.
 
+## Hosted workspace and session lifecycle
+
+Hosted workspace and session metadata is owner-scoped and durable, while runtime and client WebSockets remain disposable:
+
+- `POST /v1/workspaces`, `GET /v1/workspaces`, and `GET /v1/workspaces/:workspaceId` create and read owned workspace metadata.
+- `POST /v1/workspaces/:workspaceId/sessions` creates one queued hosted session. A workspace cannot have another queued, starting, or running session, and cannot create a replacement while its stopped runtime tunnel is still closing.
+- `GET /v1/hosted-sessions/:sessionId` reads owned session state.
+- `POST /v1/hosted-sessions/:sessionId/start`, `/stop`, and `/archive` enforce the queued, starting, running, stopped, and archived lifecycle. Stop immediately closes the mutating client and asks the runtime to shut down; restart and archive wait for its tunnel to close.
+- `GET /v1/hosted-sessions/:sessionId/rpc` attaches one authenticated client to a running session. Non-browser clients may use the normal bearer header.
+- `POST /v1/hosted-sessions/:sessionId/rpc-ticket` returns a non-cacheable, 60-second, single-use browser attachment ticket. The browser offers `pi-cloud-ticket.<ticket>` and `pi-cloud-rpc` in `Sec-WebSocket-Protocol`; the server selects only `pi-cloud-rpc`. Issuing a newer ticket revokes the prior unused ticket for that session.
+
+The internal dispatcher claims the oldest queued session through `POST /internal/v1/hosted-runtimes/claim`. The claim contains a 60-second, single-use tunnel token and only the credential values granted to that workspace; SQLite stores token digests and credential references, never those values. `GET /internal/v1/hosted-sessions/:sessionId/tunnel` consumes the token and rechecks its assignment after the WebSocket upgrade so a concurrent stop cannot restore stale runtime authority.
+
+Both WebSocket directions accept complete text JSON envelopes, validate their schemas, session IDs, direction, and contiguous sequence, and enforce configured record and cumulative byte limits. A policy failure detaches the offending connection before processing any queued frames. Runtime heartbeat expiry durably stops the session, while API restart recovery stops sessions whose ephemeral tunnels were lost. The API stores only opaque native Pi session identity and file metadata; it does not persist transcript records.
+
 ## Dispatch and recovery
 
 - `POST /internal/v1/runs/claim` atomically assigns the oldest eligible queued task to one runner and returns its signed lease.

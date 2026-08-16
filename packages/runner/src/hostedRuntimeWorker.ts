@@ -91,6 +91,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   }
   let processIdentity: RuntimeProcessIdentity | undefined;
   try {
+    options.signal?.throwIfAborted();
     await authorizeHostedRuntimeRealPaths(launch, options.authorizedRoots);
     if (options.processIsolation === "workspace_uid") processIdentity = await prepareIsolatedWorkspace(launch);
   } catch (error: unknown) {
@@ -143,7 +144,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
         maxRecordBytes: launch.limits.maxRecordBytes,
         maxCumulativeBytes: launch.limits.maxCumulativeBytes,
         cumulativeBytes: inboundCumulativeBytes,
-      });
+      }, raw.byteLength);
       inboundCumulativeBytes = bounded.cumulativeBytes;
       if (bounded.envelope.hostedSessionId !== launch.hostedSessionId) {
         throw new Error("RPC envelope is for a different hosted session");
@@ -194,13 +195,14 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
           record,
         };
         try {
+          const serialized = JSON.stringify(envelope);
           const bounded = parseBoundedHostedRpcEnvelope(envelope, {
             maxRecordBytes: launch.limits.maxRecordBytes,
             maxCumulativeBytes: launch.limits.maxCumulativeBytes,
             cumulativeBytes: outboundCumulativeBytes,
-          });
+          }, Buffer.byteLength(serialized, "utf8"));
           outboundCumulativeBytes = bounded.cumulativeBytes;
-          socket.send(JSON.stringify(bounded.envelope));
+          socket.send(serialized);
         } catch {
           socket.close(1009, "outbound RPC limit exceeded");
         }
@@ -346,7 +348,11 @@ function scrubClaimCredentials(claim: HostedRuntimeClaim): void {
 }
 
 function waitForOpen(socket: WebSocket, signal?: AbortSignal): Promise<void> {
-  if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+  if (socket.readyState === WebSocket.OPEN) {
+    if (!signal?.aborted) return Promise.resolve();
+    socket.terminate();
+    return Promise.reject(signal.reason ?? new Error("Hosted runtime startup aborted"));
+  }
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       socket.off("open", onOpen);
@@ -365,7 +371,7 @@ function waitForOpen(socket: WebSocket, signal?: AbortSignal): Promise<void> {
       cleanup();
       socket.once("error", () => undefined);
       socket.terminate();
-      reject(new Error("Hosted runtime startup aborted"));
+      reject(signal?.reason ?? new Error("Hosted runtime startup aborted"));
     };
     socket.once("open", onOpen);
     socket.once("error", onError);

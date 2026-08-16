@@ -103,14 +103,18 @@ export type HostedRpcEnvelope = z.infer<typeof hostedRpcEnvelopeSchema>;
 export type HostedRpcClientEnvelope = z.infer<typeof hostedRpcClientEnvelopeSchema>;
 export type HostedRpcEnvelopeBounds = z.input<typeof hostedRpcEnvelopeBoundsSchema>;
 
-/** Validates an envelope and accounts for its UTF-8 wire size against caller-owned bounds. */
+/**
+ * Validates an envelope and accounts for its original UTF-8 wire size against caller-owned bounds.
+ * The byte count is required because parsing loses insignificant whitespace and duplicate-key data.
+ */
 export function parseBoundedHostedRpcEnvelope(
   value: unknown,
   bounds: HostedRpcEnvelopeBounds,
+  wireBytes: number,
 ): { envelope: HostedRpcEnvelope; cumulativeBytes: number } {
   const parsedBounds = hostedRpcEnvelopeBoundsSchema.parse(bounds);
   const envelope = hostedRpcEnvelopeSchema.parse(value);
-  const bytes = new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
+  const bytes = boundedEnvelopeBytes(wireBytes);
   if (bytes > parsedBounds.maxRecordBytes) throw new Error("RPC envelope exceeds maxRecordBytes");
   const cumulativeBytes = parsedBounds.cumulativeBytes + bytes;
   if (cumulativeBytes > parsedBounds.maxCumulativeBytes) throw new Error("RPC envelopes exceed maxCumulativeBytes");
@@ -121,12 +125,20 @@ export function parseBoundedHostedRpcEnvelope(
 export function parseBoundedHostedRpcClientEnvelope(
   value: unknown,
   bounds: HostedRpcEnvelopeBounds,
+  wireBytes: number,
 ): { envelope: HostedRpcClientEnvelope; cumulativeBytes: number } {
   const parsedBounds = hostedRpcEnvelopeBoundsSchema.parse(bounds);
   const envelope = hostedRpcClientEnvelopeSchema.parse(value);
-  const bytes = new TextEncoder().encode(JSON.stringify(envelope)).byteLength;
+  const bytes = boundedEnvelopeBytes(wireBytes);
   if (bytes > parsedBounds.maxRecordBytes) throw new Error("RPC envelope exceeds maxRecordBytes");
   const cumulativeBytes = parsedBounds.cumulativeBytes + bytes;
   if (cumulativeBytes > parsedBounds.maxCumulativeBytes) throw new Error("RPC envelopes exceed maxCumulativeBytes");
   return { envelope, cumulativeBytes };
+}
+
+function boundedEnvelopeBytes(wireBytes: number): number {
+  if (!Number.isSafeInteger(wireBytes) || wireBytes <= 0) {
+    throw new Error("wireBytes must be a positive safe integer");
+  }
+  return wireBytes;
 }

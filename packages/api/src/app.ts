@@ -205,7 +205,7 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
       principal(request.headers.authorization),
       required(sessionId),
     );
-    return reply.code(201).send(ticket);
+    return reply.header("cache-control", "no-store").code(201).send(ticket);
   });
 
   app.get(

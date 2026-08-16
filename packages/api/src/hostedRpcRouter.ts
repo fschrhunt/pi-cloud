@@ -84,6 +84,11 @@ export class HostedRpcRouter {
     return this.runtimes.has(sessionId);
   }
 
+  /** Reports whether any process tunnel can still mutate one workspace. */
+  hasRuntimeForWorkspace(workspaceRoot: string): boolean {
+    return [...this.runtimes.values()].some((runtime) => runtime.workspaceRoot === workspaceRoot);
+  }
+
   hasActiveClient(sessionId: string): boolean {
     return this.runtimes.get(sessionId)?.client !== undefined;
   }
@@ -101,10 +106,14 @@ export class HostedRpcRouter {
     this.runtimes.clear();
   }
 
-  /** Sends the out-of-band stop control that is not itself a sequenced hosted-RPC envelope. */
+  /** Stops client mutation immediately, then asks the runtime to perform its bounded process shutdown. */
   sendStopControl(sessionId: string): void {
     const runtime = this.runtimes.get(sessionId);
-    if (runtime && runtime.socket.readyState === websocketOpen) runtime.socket.send(stopControlMessage);
+    if (!runtime) return;
+    const client = runtime.client;
+    runtime.client = undefined;
+    closeIfOpen(client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted session stopped");
+    if (runtime.socket.readyState === websocketOpen) runtime.socket.send(stopControlMessage);
   }
 
   /** Closes runtime tunnels that stopped sending authenticated activity or heartbeat controls. */
@@ -112,11 +121,7 @@ export class HostedRpcRouter {
     const now = this.clock().getTime();
     for (const runtime of this.runtimes.values()) {
       if (now - runtime.lastHeartbeatAt <= this.heartbeatTimeoutMs) continue;
-      this.runtimes.delete(runtime.sessionId);
-      clearInterval(runtime.heartbeatTimer);
-      this.store.markHostedSessionStoppedByRuntime(runtime.sessionId, this.clock());
-      closeIfOpen(runtime.client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
-      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
+      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
     }
   }
 
@@ -134,6 +139,10 @@ export class HostedRpcRouter {
     }
     if (this.runtimes.has(options.sessionId)) {
       closeIfOpen(options.socket, hostedPolicyCloseCodes.duplicateClient, "hosted runtime already connected");
+      return;
+    }
+    if (!this.store.isHostedRuntimeAssignmentAttachable(options.assignmentId, options.sessionId)) {
+      closeIfOpen(options.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime assignment is no longer active");
       return;
     }
     const runtime: RuntimeConnection = {
@@ -156,6 +165,7 @@ export class HostedRpcRouter {
     this.runtimes.set(options.sessionId, runtime);
 
     options.socket.on("message", (data, isBinary) => {
+      if (this.runtimes.get(options.sessionId) !== runtime) return;
       this.onRuntimeMessage(runtime, data, isBinary);
     });
     options.socket.once("close", () => {
@@ -164,7 +174,9 @@ export class HostedRpcRouter {
       this.runtimes.delete(options.sessionId);
       if (!this.closed) {
         this.store.markHostedSessionStoppedByRuntime(options.sessionId, this.clock());
-        closeIfOpen(runtime.client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime disconnected");
+        const client = runtime.client;
+        runtime.client = undefined;
+        closeIfOpen(client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime disconnected");
       }
     });
     options.socket.on("error", () => undefined);
@@ -177,7 +189,7 @@ export class HostedRpcRouter {
       return;
     }
     const attachedRuntime = this.runtimes.get(sessionId);
-    if (!attachedRuntime) {
+    if (!attachedRuntime || !this.store.isHostedSessionRunning(sessionId)) {
       closeIfOpen(socket, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime disconnected before client attachment");
       return;
     }
@@ -240,7 +252,7 @@ export class HostedRpcRouter {
       limits: runtime.limits,
     });
     if (!outcome.ok) {
-      closeIfOpen(runtime.socket, outcome.code, outcome.reason);
+      this.disconnectRuntime(runtime, outcome.code, outcome.reason);
       return;
     }
     runtime.inboundSequence += 1;
@@ -263,7 +275,7 @@ export class HostedRpcRouter {
       limits: runtime.limits,
     });
     if (!outcome.ok) {
-      closeIfOpen(client.socket, outcome.code, outcome.reason);
+      this.disconnectClient(runtime, client, outcome.code, outcome.reason);
       return;
     }
     client.inboundSequence += 1;
@@ -278,13 +290,13 @@ export class HostedRpcRouter {
 
     const parsed = startupStateResponseSchema.safeParse(envelope.record);
     if (!parsed.success) {
-      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.invalidEnvelope, "invalid native session startup response");
+      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.invalidEnvelope, "invalid native session startup response");
       return true;
     }
 
     const sessionRoot = newSessionDirectoryFor(runtime.workspaceRoot, runtime.sessionId);
     if (!isContainedPath(sessionRoot, parsed.data.data.sessionFile)) {
-      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.invalidEnvelope, "native session file escapes the configured session root");
+      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.invalidEnvelope, "native session file escapes the configured session root");
       return true;
     }
     const recorded = this.store.recordNativeSessionMetadata(
@@ -294,7 +306,7 @@ export class HostedRpcRouter {
       this.clock(),
     );
     if (!recorded) {
-      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.invalidEnvelope, "native session identity changed across runtime restart");
+      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.invalidEnvelope, "native session identity changed across runtime restart");
     }
     return true;
   }
@@ -311,7 +323,7 @@ export class HostedRpcRouter {
     };
     const bytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
     if (!withinBudget(runtime.limits, bytes, client.outboundCumulativeBytes)) {
-      closeIfOpen(client.socket, hostedPolicyCloseCodes.budgetExceeded, "outbound RPC limit exceeded");
+      this.disconnectClient(runtime, client, hostedPolicyCloseCodes.budgetExceeded, "outbound RPC limit exceeded");
       return;
     }
     client.outboundSequence += 1;
@@ -329,12 +341,28 @@ export class HostedRpcRouter {
     };
     const bytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
     if (!withinBudget(runtime.limits, bytes, runtime.outboundCumulativeBytes)) {
-      closeIfOpen(runtime.socket, hostedPolicyCloseCodes.budgetExceeded, "inbound RPC limit exceeded");
+      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.budgetExceeded, "inbound RPC limit exceeded");
       return;
     }
     runtime.outboundSequence += 1;
     runtime.outboundCumulativeBytes += bytes;
     if (runtime.socket.readyState === websocketOpen) runtime.socket.send(JSON.stringify(outbound));
+  }
+
+  private disconnectClient(runtime: RuntimeConnection, client: ClientConnection, code: number, reason: string): void {
+    if (runtime.client === client) runtime.client = undefined;
+    closeIfOpen(client.socket, code, reason);
+  }
+
+  private disconnectRuntime(runtime: RuntimeConnection, code: number, reason: string): void {
+    if (this.runtimes.get(runtime.sessionId) !== runtime) return;
+    this.runtimes.delete(runtime.sessionId);
+    clearInterval(runtime.heartbeatTimer);
+    this.store.markHostedSessionStoppedByRuntime(runtime.sessionId, this.clock());
+    const client = runtime.client;
+    runtime.client = undefined;
+    closeIfOpen(client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, reason);
+    closeIfOpen(runtime.socket, code, reason);
   }
 }
 

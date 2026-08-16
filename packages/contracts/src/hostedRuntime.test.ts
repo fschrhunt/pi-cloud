@@ -4,6 +4,7 @@ import {
   hostedRpcClientEnvelopeSchema,
   hostedRuntimeClaimSchema,
   hostedRuntimeLaunchSchema,
+  hostedTunnelUrlSchema,
   parseBoundedHostedRpcEnvelope,
 } from "./index.js";
 
@@ -59,6 +60,19 @@ test("hosted runtime launch requires immutable, absolute, explicitly trusted inp
     ...claim,
     credentials: [{ reference: "vault://other/key", value: "wrong-secret" }],
   }), /not granted by the launch/);
+  assert.throws(() => hostedRuntimeClaimSchema.parse({
+    ...claim,
+    tunnel: { ...claim.tunnel, url: "https://pi-cloud.example.com/tunnel" },
+  }), /ws\/wss/);
+  assert.throws(() => hostedRuntimeClaimSchema.parse({
+    ...claim,
+    tunnel: { ...claim.tunnel, url: "wss://token@pi-cloud.example.com/tunnel" },
+  }), /ws\/wss/);
+});
+
+test("runtime tunnel URLs reject credential-bearing and non-WebSocket endpoints", () => {
+  assert.equal(hostedTunnelUrlSchema.parse("ws://127.0.0.1:3000/tunnel"), "ws://127.0.0.1:3000/tunnel");
+  assert.throws(() => hostedTunnelUrlSchema.parse("wss://pi-cloud.example.com/tunnel?token=secret"), /ws\/wss/);
 });
 
 test("client RPC validation preserves request ids and additional native JSON payload", () => {
@@ -95,11 +109,21 @@ test("bounded envelope parsing accounts for UTF-8 bytes cumulatively", () => {
   };
   const bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
   assert.equal(
-    parseBoundedHostedRpcEnvelope(value, { maxRecordBytes: bytes, maxCumulativeBytes: bytes }).cumulativeBytes,
+    parseBoundedHostedRpcEnvelope(value, { maxRecordBytes: bytes, maxCumulativeBytes: bytes }, bytes).cumulativeBytes,
     bytes,
   );
   assert.throws(
-    () => parseBoundedHostedRpcEnvelope(value, { maxRecordBytes: bytes - 1, maxCumulativeBytes: bytes }),
+    () => parseBoundedHostedRpcEnvelope(value, { maxRecordBytes: bytes - 1, maxCumulativeBytes: bytes }, bytes),
+    /maxRecordBytes/,
+  );
+
+  const paddedWireValue = JSON.stringify(value, null, 2);
+  assert.throws(
+    () => parseBoundedHostedRpcEnvelope(
+      value,
+      { maxRecordBytes: bytes, maxCumulativeBytes: bytes },
+      new TextEncoder().encode(paddedWireValue).byteLength,
+    ),
     /maxRecordBytes/,
   );
 });

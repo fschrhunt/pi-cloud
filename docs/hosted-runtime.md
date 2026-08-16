@@ -23,7 +23,7 @@ Hosted runner:
 - `PI_CLOUD_HOSTED_SESSION_ROOTS`
 - `PI_CLOUD_HOSTED_AGENT_ROOTS`
 - `PI_CLOUD_HOSTED_PROCESS_ISOLATION` (`workspace_uid` for untrusted execution)
-- optional `PI_CLOUD_PI_EXECUTABLE`
+- optional container-internal `PI_CLOUD_PI_EXECUTABLE` as a PATH command name or absolute trusted image path (the bundled image provides `pi`)
 
 See [../.env.example](../.env.example) for a local single-operator example.
 
@@ -42,6 +42,7 @@ Hosted sessions:
 - `POST /v1/hosted-sessions/:sessionId/start`
 - `POST /v1/hosted-sessions/:sessionId/stop`
 - `POST /v1/hosted-sessions/:sessionId/archive`
+- `POST /v1/hosted-sessions/:sessionId/rpc-ticket` mint a browser-compatible attachment ticket
 - `GET /v1/hosted-sessions/:sessionId/rpc` public authenticated WebSocket
 
 Internal worker endpoints:
@@ -101,8 +102,24 @@ Each internal claim returns:
 Public client:
 
 - endpoint: `GET /v1/hosted-sessions/:sessionId/rpc`
-- auth: normal API bearer token
+- non-browser auth: normal API bearer token in `Authorization`
+- browser auth: mint a ticket with an authenticated `POST /v1/hosted-sessions/:sessionId/rpc-ticket`, then open the WebSocket with subprotocols `pi-cloud-rpc` and `pi-cloud-ticket.<ticket>`
+- ticket policy: random, single-use, valid for 60 seconds, and scoped to one hosted session
 - policy: one active client per hosted session
+
+The browser flow keeps bearer credentials out of WebSocket URLs and works with the native browser `WebSocket` API:
+
+```js
+const response = await fetch(`/v1/hosted-sessions/${sessionId}/rpc-ticket`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${apiToken}` },
+});
+const { ticket } = await response.json();
+const socket = new WebSocket(
+  `/v1/hosted-sessions/${sessionId}/rpc`,
+  ["pi-cloud-rpc", `pi-cloud-ticket.${ticket}`],
+);
+```
 
 Internal runtime tunnel:
 
@@ -211,7 +228,8 @@ Stable policy close codes:
 - `4408` duplicate runtime or client attachment
 - `4409` sequence gap
 - `4410` runtime disconnected or heartbeat expired
-- `4413` per-record or cumulative byte limit exceeded
+- `4413` cumulative or routed-record byte limit exceeded
+- `1009` frame rejected by the WebSocket server before routing because it exceeds `maxRecordBytes`
 
 Other important failures:
 
@@ -227,14 +245,20 @@ Other important failures:
 
 The Compose worker reaches a host-run API through `host.docker.internal`. For that local-only setup, start the API with `PI_CLOUD_PUBLIC_BASE_URL=http://host.docker.internal:3000`, set `PI_CLOUD_HOSTED_CONTAINER_DISPATCHER_URL` if the API uses another container-facing address, and set `PI_CLOUD_HOSTED_DISPATCHER_TOKEN` to the same value as the API's `PI_CLOUD_DISPATCHER_TOKEN`. Compose intentionally ignores the host-only loopback `PI_CLOUD_HOSTED_DISPATCHER_URL`.
 
-Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. Set `PI_CLOUD_HOST_AGENT_DIRECTORY` to a populated operator Pi directory, which Compose bind-mounts read-only. A local copy can be initialized with:
+Compose uses fixed `/var/lib/pi-cloud/workspaces` and `/var/lib/pi-cloud/agent` mount targets; the generic runner root overrides are intentionally not applied to this provider. `PI_CLOUD_HOST_AGENT_DIRECTORY` must point to a reviewed, resource-only Pi directory. Compose bind-mounts it read-only, and startup rejects `auth.json`, native `sessions`, symbolic links, or paths that isolated workspace UIDs cannot read and traverse.
+
+Do not mount or copy a complete `~/.pi/agent`: it can contain persisted provider tokens in `auth.json` and other operator-only state. Build a sanitized directory from only the resources that hosted repositories should receive, then review any `settings.json` or `models.json` separately and use environment references for scoped credentials rather than literal values:
 
 ```bash
+source_agent="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
 mkdir -p data/pi-agent
-cp -R "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/." data/pi-agent/
+for resource in AGENTS.md SYSTEM.md APPEND_SYSTEM.md extensions skills prompts themes; do
+  test ! -e "$source_agent/$resource" || cp -R "$source_agent/$resource" data/pi-agent/
+done
+chmod -R go+rX data/pi-agent
 ```
 
-The default bind source is `./data/pi-agent`, so a fresh deployment must run this initialization or point at an existing directory before starting the worker.
+The default bind source is `./data/pi-agent`. A fresh deployment must prepare it before starting the worker. The container has writable `/run` storage for firewall locks and only the capabilities needed to configure networking, manage per-workspace ownership and modes, drop identities, and terminate workspace processes.
 
 The trusted root supervisor keeps dispatcher authority and the full workspace volume. Its firewall permits public Git/provider egress but rejects host, link-local, carrier-grade NAT, and RFC1918 destinations for every non-root Pi UID. Before starting Pi, it assigns a stable high-numbered UID to the claimed workspace, makes that workspace's storage root mode `0700`, checks for UID collisions, and drops the Pi child to that UID. Sibling workspace repositories and native sessions are therefore inaccessible, and Pi cannot read the root supervisor's dispatcher token through `/proc`. Pi receives writable `HOME`, `TMPDIR`, `TMP`, and `TEMP` directories under its own hosted session directory.
 
@@ -244,4 +268,6 @@ Cleartext HTTP and WebSocket transport is accepted only for loopback and the Doc
 
 ## Smoke test
 
-`npm run smoke:hosted` loads `.env` when present, starts a dedicated temporary API, builds the runner image, and runs each smoke worker inside the same container isolation boundary as Compose. Set `PI_CLOUD_SMOKE_AGENT_DIRECTORY` when the operator Pi resources are not under `PI_CODING_AGENT_DIR` or `~/.pi/agent`. It requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, then removes its temporary database, repository checkout, and native session files on every exit.
+`npm run smoke:hosted` loads `.env` when present, starts a dedicated temporary API on a container-reachable interface while keeping its public client URL on loopback, builds the runner image, and runs each smoke worker inside the same container isolation boundary as Compose. It uses `PI_CLOUD_SMOKE_AGENT_DIRECTORY`, then `PI_CLOUD_HOST_AGENT_DIRECTORY`, then `./data/pi-agent`; that directory must satisfy the same sanitized, readable resource contract described above. `PI_CLOUD_SMOKE_PI_EXECUTABLE` names a PATH command or absolute trusted executable already installed inside the Linux runner image; otherwise smoke workers use the image's bundled `pi`. Host executables are intentionally not mounted because macOS binaries and host-only launchers cannot run inside the container.
+
+The smoke flow requires a real HTTPS repository URL and full commit SHA, operator-configured Pi model access, and matching hosted credential-reference values when the workspace requests them. A root helper inside the container boundary verifies the sealed checkout and native session without granting the host account access to workspace-UID data. The flow verifies native transcript entries after worker replacement, archives the stopped hosted session through the public API, and handles normal completion, failures, `SIGINT`, and `SIGTERM` by removing its Compose resources, temporary database, checkout, and native session files.

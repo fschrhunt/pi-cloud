@@ -65,7 +65,7 @@ Server-side Pi uses its normal resource system:
 
 A trusted Pi package exposes cloud capabilities required by the hosted runtime through Pi's public extension API and a narrow per-session capability channel.
 
-The persistent instance agent directory is operator-owned. An administrative Pi session can update it so Pi can customize future hosted sessions. Repository sessions receive the instance resources selected by the operator, and project resources execute under Pi project trust inside the workspace boundary.
+The persistent instance agent directory is operator-owned. An administrative Pi session can update it so Pi can customize future hosted sessions. Repository sessions receive a reviewed resource-only view selected by the operator; persisted provider authentication is excluded and credentials arrive through scoped claims. Project resources execute under Pi project trust inside the workspace boundary.
 
 ## Repository support
 

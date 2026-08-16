@@ -9,7 +9,7 @@ import {
   type Principal,
   type Workspace,
 } from "./domain.js";
-import { ApiError, conflict } from "./errors.js";
+import { ApiError, conflict, unauthorized } from "./errors.js";
 import { HostedRpcRouter } from "./hostedRpcRouter.js";
 import { newSessionDirectoryFor, workspaceRootFor } from "./hostedPaths.js";
 import type { ControlPlaneStore } from "./store.js";
@@ -20,10 +20,19 @@ const listQuerySchema = z.object({
   cursor: z.string().min(1).optional(),
 });
 const claimRequestSchema = z.object({ runnerId: z.string().min(1).max(200) }).strict();
+const clientTicketSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
+const clientTicketLifetimeMs = 60_000;
+
+type ClientAttachmentTicket = {
+  sessionId: string;
+  expiresAt: Date;
+  principal: Principal;
+};
 
 /** Coordinates authenticated hosted-workspace and hosted-session lifecycle over durable metadata. */
 export class HostedControlPlane {
   readonly router: HostedRpcRouter;
+  private readonly clientTickets = new Map<string, ClientAttachmentTicket>();
 
   constructor(
     private readonly config: ApiConfig,
@@ -93,8 +102,38 @@ export class HostedControlPlane {
     return this.store.archiveHostedSession(principal.id, sessionId, this.clock());
   }
 
-  /** Closes ephemeral routed sockets before the durable store is shut down. */
+  /** Issues one short-lived, single-use browser attachment ticket for a running owned session. */
+  issueClientTicket(principal: Principal, sessionId: string): { ticket: string; expiresAt: string } {
+    this.authorizeClientConnection(principal, sessionId);
+    this.sweepClientTickets();
+    const ticket = randomBytes(32).toString("base64url");
+    const expiresAt = new Date(this.clock().getTime() + clientTicketLifetimeMs);
+    this.clientTickets.set(tokenDigest(ticket), { sessionId, expiresAt, principal });
+    return { ticket, expiresAt: expiresAt.toISOString() };
+  }
+
+  /** Consumes one browser attachment ticket and rechecks session state at WebSocket upgrade time. */
+  authorizeClientTicket(sessionId: string, ticket: unknown): HostedSession {
+    const parsedTicket = clientTicketSchema.safeParse(ticket);
+    if (!parsedTicket.success) throw unauthorized();
+    const digest = tokenDigest(parsedTicket.data);
+    const issued = this.clientTickets.get(digest);
+    if (!issued || issued.sessionId !== sessionId) throw unauthorized();
+    this.clientTickets.delete(digest);
+    if (issued.expiresAt.getTime() < this.clock().getTime()) throw unauthorized();
+    return this.authorizeClientConnection(issued.principal, sessionId);
+  }
+
+  private sweepClientTickets(): void {
+    const now = this.clock().getTime();
+    for (const [digest, ticket] of this.clientTickets) {
+      if (ticket.expiresAt.getTime() < now) this.clientTickets.delete(digest);
+    }
+  }
+
+  /** Closes ephemeral routed sockets and discards attachment tickets before the durable store is shut down. */
   close(): void {
+    this.clientTickets.clear();
     this.router.close();
   }
 

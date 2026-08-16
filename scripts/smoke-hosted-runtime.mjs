@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 /** Exercises an isolated single-operator hosted runtime flow against a dedicated API and real Pi CLI. */
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -20,7 +20,8 @@ const defaultExpectedMarker = "SMOKE_OK";
 const maxDiagnosticBytes = 32_768;
 
 async function main() {
-  const config = await readConfig(process.env);
+  let controlPlaneRoot;
+  let config;
   /** @type {RunnerProcess[]} */
   const runners = [];
   /** @type {HostedClientConnection[]} */
@@ -28,11 +29,47 @@ async function main() {
   /** @type {ApiProcess | undefined} */
   let api;
   let finalSummary;
+  let composeTouched = false;
+  let runtimeFilesMayExist = false;
+  let cleanupPromise;
+  let mainError;
+  let terminating = false;
+
+  const cleanup = () => {
+    cleanupPromise ??= config
+      ? cleanupSmokeResources({
+        config,
+        clients,
+        runners,
+        api: () => api,
+        composeTouched,
+        runtimeFilesMayExist,
+      })
+      : controlPlaneRoot
+        ? rm(controlPlaneRoot, { recursive: true, force: true })
+        : Promise.resolve();
+    return cleanupPromise;
+  };
+  const terminate = (signal) => {
+    if (terminating) return;
+    terminating = true;
+    void cleanup()
+      .catch((error) => console.error(`Smoke cleanup failed after ${signal}: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  const onSigint = () => terminate("SIGINT");
+  const onSigterm = () => terminate("SIGTERM");
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
 
   try {
+    controlPlaneRoot = await mkdtemp(join(tmpdir(), "pi-cloud-smoke-"));
+    config = await readConfig(process.env, controlPlaneRoot);
     await assertBuiltRuntime();
+    assertDockerAvailable();
+    await assertHostedAgentDirectory(config.operatorAgentDirectory);
+    composeTouched = true;
     buildSmokeRunnerImage(config);
-    assertPiExecutable(config.piExecutable);
     await ensureRuntimeRoots(config);
 
     api = new ApiProcess(config);
@@ -41,15 +78,14 @@ async function main() {
     const workspace = await createWorkspace(config);
     const session = await createSession(config, workspace.id);
     const expectedWorkspaceRoot = workspace.root;
+    runtimeFilesMayExist = true;
 
     const firstRunner = startHostedRunner(config, "run-1");
     runners.push(firstRunner);
 
     const firstRunningSession = await waitForSessionState(config, session.id, ["running"], 120_000, firstRunner);
     const initialNative = await waitForNativeSession(config, session.id, 120_000, firstRunner);
-    await assertPathExists(expectedWorkspaceRoot, "workspace root");
-    await assertPathExists(initialNative.nativeSessionFile, "native session file");
-    assertRepositoryCheckout(config, expectedWorkspaceRoot);
+    await inspectSmokeRuntime(config, expectedWorkspaceRoot, initialNative.nativeSessionFile);
 
     const firstClient = await openHostedClient(config, session.id);
     clients.push(firstClient);
@@ -92,8 +128,7 @@ async function main() {
     const finalWorkspace = await getWorkspace(config, workspace.id);
     if (finalWorkspace.root !== expectedWorkspaceRoot) throw new Error("Workspace root changed across the smoke flow");
     if (finalSession.nativeSessionFile !== initialNative.nativeSessionFile) throw new Error("Native session file changed across restart");
-    await assertPathExists(finalWorkspace.root, "persistent workspace root");
-    await assertPathExists(finalSession.nativeSessionFile, "persistent native session file");
+    await inspectSmokeRuntime(config, finalWorkspace.root, finalSession.nativeSessionFile);
 
     finalSummary = {
       workspaceId: workspace.id,
@@ -110,12 +145,19 @@ async function main() {
 
     const archived = await archiveSession(config, session.id);
     if (archived.state !== "archived") throw new Error(`Archive returned unexpected state: ${archived.state}`);
+  } catch (error) {
+    mainError = error;
+    throw error;
   } finally {
-    for (const client of clients) await client.close().catch(() => undefined);
-    for (const runner of runners) await runner.stop().catch(() => undefined);
-    await api?.stop().catch(() => undefined);
-    await cleanupSmokeCompose(config).catch(() => undefined);
-    await rm(config.controlPlaneRoot, { recursive: true, force: true });
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!mainError) throw error;
+      console.error(`Smoke cleanup also failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      process.off("SIGINT", onSigint);
+      process.off("SIGTERM", onSigterm);
+    }
   }
 
   console.log("Hosted runtime smoke passed.");
@@ -125,7 +167,7 @@ async function main() {
   console.log(`Prompt result: ${finalSummary.promptMessage}`);
 }
 
-async function readConfig(env) {
+async function readConfig(env, controlPlaneRoot) {
   const repositoryUrl = required(env.PI_CLOUD_SMOKE_REPOSITORY_URL, "PI_CLOUD_SMOKE_REPOSITORY_URL");
   const revision = required(env.PI_CLOUD_SMOKE_REVISION, "PI_CLOUD_SMOKE_REVISION");
   const expectedMarker = env.PI_CLOUD_SMOKE_EXPECTED_MARKER ?? defaultExpectedMarker;
@@ -136,14 +178,13 @@ async function readConfig(env) {
     hostedCredentialReferences,
   );
   const hostedCredentials = parseHostedCredentialValues(env.PI_CLOUD_HOSTED_CREDENTIALS, hostedCredentialReferences);
-  const controlPlaneRoot = await mkdtemp(join(tmpdir(), "pi-cloud-smoke-"));
 
   try {
     const apiPort = await reserveUnusedLoopbackPort();
     const apiBaseUrl = parseUrl(`http://127.0.0.1:${apiPort}`, "generated API base URL");
     const runnerDispatcherUrl = parseUrl(`http://host.docker.internal:${apiPort}`, "container API base URL");
     const operatorAgentDirectory = resolve(
-      env.PI_CLOUD_SMOKE_AGENT_DIRECTORY ?? env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+      env.PI_CLOUD_SMOKE_AGENT_DIRECTORY ?? env.PI_CLOUD_HOST_AGENT_DIRECTORY ?? "data/pi-agent",
     );
     await assertPathExists(operatorAgentDirectory, "operator Pi agent directory");
     const dispatcherToken = randomToken();
@@ -181,7 +222,7 @@ async function readConfig(env) {
       hostedCredentialsJson: hostedCredentials.json,
       hostedCredentialValues: hostedCredentials.secrets,
       credentialReferenceNames,
-      piExecutable: env.PI_CLOUD_PI_EXECUTABLE ?? "pi",
+      piExecutable: env.PI_CLOUD_SMOKE_PI_EXECUTABLE ?? "pi",
       secrets: [
         userToken,
         dispatcherToken,
@@ -327,7 +368,10 @@ async function ensureRuntimeRoots(config) {
     .flatMap((value) => value.split(delimiter))
     .filter(Boolean);
   try {
-    await Promise.all(roots.map((root) => mkdir(root, { recursive: true })));
+    await Promise.all(roots.map(async (root) => {
+      await mkdir(root, { recursive: true });
+      await chmod(root, 0o711);
+    }));
   } catch (error) {
     throw new Error(
       `Unable to create hosted runtime roots (${roots.join(", ")}): ${error instanceof Error ? error.message : String(error)}`,
@@ -345,26 +389,141 @@ function buildSmokeRunnerImage(config) {
   if (result.status !== 0) throw new Error(`Unable to build isolated smoke runner image: ${result.stderr.trim()}`);
 }
 
-function assertPiExecutable(piExecutable) {
-  if (!piExecutable.startsWith("/")) return;
-  const result = spawnSync(piExecutable, ["--help"], { encoding: "utf8", timeout: 15_000 });
-  if (result.error?.code === "ENOENT") {
-    throw new Error(`Pi executable not found on PATH: ${piExecutable}. Install Pi or set PI_CLOUD_PI_EXECUTABLE.`);
+/** Fails before provisioning when the Docker CLI, Compose plugin, or daemon is unavailable. */
+function assertDockerAvailable() {
+  const docker = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], { encoding: "utf8", timeout: 15_000 });
+  if (docker.error?.code === "ENOENT") {
+    throw new Error("Hosted runtime smoke requires the Docker CLI and Compose plugin");
   }
-  if (result.error) {
-    throw new Error(`Failed to invoke ${piExecutable}: ${result.error.message}`);
+  if (docker.error) throw new Error(`Failed to check Docker: ${docker.error.message}`);
+  if (docker.status !== 0) {
+    throw new Error(
+      "Hosted runtime smoke requires a running Docker daemon. Start it on demand (for example, `colima start` on macOS), rerun the smoke command, then stop it with `colima stop`.",
+    );
   }
+
+  const compose = spawnSync("docker", ["compose", "version"], { encoding: "utf8", timeout: 15_000 });
+  if (compose.error) throw new Error(`Failed to check Docker Compose: ${compose.error.message}`);
+  if (compose.status !== 0) throw new Error("Hosted runtime smoke requires the Docker Compose plugin");
 }
 
-function assertRepositoryCheckout(config, workspaceRoot) {
-  const revision = spawnSync("git", ["-C", workspaceRoot, "rev-parse", "HEAD"], { encoding: "utf8", timeout: 30_000 });
-  const remote = spawnSync("git", ["-C", workspaceRoot, "remote", "get-url", "origin"], { encoding: "utf8", timeout: 30_000 });
-  if (revision.status !== 0 || revision.stdout.trim().toLowerCase() !== config.revision.toLowerCase()) {
-    throw new Error("Smoke workspace did not materialize the requested revision");
+async function assertHostedAgentDirectory(root) {
+  for (const forbidden of [join(root, "auth.json"), join(root, "sessions")]) {
+    try {
+      await access(forbidden, fsConstants.F_OK);
+      throw new Error(`Hosted Pi resource directory contains forbidden persisted state: ${forbidden}`);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
   }
-  if (remote.status !== 0 || new URL(remote.stdout.trim()).toString() !== new URL(config.repositoryUrl).toString()) {
-    throw new Error("Smoke workspace did not materialize the requested repository origin");
+
+  const inspect = async (path) => {
+    const stats = await lstat(path);
+    if (stats.isSymbolicLink()) throw new Error(`Hosted Pi resources must not contain symbolic links: ${path}`);
+    if (stats.isDirectory()) {
+      if ((stats.mode & 0o005) !== 0o005) {
+        throw new Error(`Hosted Pi resource directory is not readable and traversable by workspace UIDs: ${path}`);
+      }
+      for (const entry of await readdir(path)) await inspect(join(path, entry));
+      return;
+    }
+    if (stats.isFile() && (stats.mode & 0o004) !== 0o004) {
+      throw new Error(`Hosted Pi resource file is not readable by workspace UIDs: ${path}`);
+    }
+  };
+  await inspect(root);
+}
+
+async function inspectSmokeRuntime(config, workspaceRoot, nativeSessionFile) {
+  const source = `
+    import { access } from "node:fs/promises";
+    import { execFileSync } from "node:child_process";
+    const [workspaceRoot, nativeSessionFile, revision, repositoryUrl] = process.argv.slice(1);
+    await access(workspaceRoot);
+    await access(nativeSessionFile);
+    const git = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
+    const head = execFileSync("git", [...git, "-c", "safe.directory=*", "-C", workspaceRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const remote = execFileSync("git", [...git, "-c", "safe.directory=*", "-C", workspaceRoot, "remote", "get-url", "origin"], { encoding: "utf8" }).trim();
+    if (head.toLowerCase() !== revision.toLowerCase()) throw new Error("Smoke workspace revision mismatch");
+    if (new URL(remote).toString() !== new URL(repositoryUrl).toString()) throw new Error("Smoke workspace origin mismatch");
+  `;
+  await runSmokeComposeUtility(config, source, [workspaceRoot, nativeSessionFile, config.revision, config.repositoryUrl], "ro");
+}
+
+async function cleanupSmokeRuntimeFiles(config) {
+  const source = `
+    import { readdir, rm } from "node:fs/promises";
+    import { join } from "node:path";
+    const [root] = process.argv.slice(1);
+    for (const entry of await readdir(root)) await rm(join(root, entry), { recursive: true, force: true });
+  `;
+  await runSmokeComposeUtility(config, source, [config.workspaceRoots], "rw");
+}
+
+async function runSmokeComposeUtility(config, source, args, mountMode) {
+  const command = [
+    "compose",
+    "--project-name",
+    config.composeProject,
+    "run",
+    "--rm",
+    "--no-deps",
+    "--volume",
+    `${config.workspaceRoots}:${config.workspaceRoots}:${mountMode}`,
+    "--entrypoint",
+    "node",
+    "hosted-runner",
+    "--input-type=module",
+    "--eval",
+    source,
+    ...args,
+  ];
+  await new Promise((resolvePromise, reject) => {
+    const child = spawn("docker", command, {
+      cwd: process.cwd(),
+      env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk); });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolvePromise(undefined);
+    };
+    child.once("error", (error) => finish(error));
+    child.once("close", (code, signal) => finish(code === 0
+      ? undefined
+      : new Error(`Smoke utility failed with code=${String(code)} signal=${String(signal)}: ${stderr.trim() || stdout.trim()}`)));
+  });
+}
+
+async function cleanupSmokeResources({ config, clients, runners, api, composeTouched, runtimeFilesMayExist }) {
+  const errors = [];
+  const attempt = async (label, operation) => {
+    try {
+      await operation();
+    } catch (error) {
+      errors.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  for (const client of clients) await attempt("close client", () => client.close());
+  for (const runner of runners) await attempt("stop runner", () => runner.stop());
+  await attempt("stop API", async () => api()?.stop());
+  if (composeTouched && runtimeFilesMayExist) {
+    await attempt("remove UID-owned runtime files", () => cleanupSmokeRuntimeFiles(config));
   }
+  if (composeTouched) await attempt("remove Compose project", () => cleanupSmokeCompose(config));
+  await attempt("remove temporary control-plane root", () => rm(config.controlPlaneRoot, { recursive: true, force: true }));
+  if (errors.length > 0) throw new Error(`Hosted smoke cleanup failed: ${errors.join("; ")}`);
 }
 
 async function cleanupSmokeCompose(config) {
@@ -372,10 +531,24 @@ async function cleanupSmokeCompose(config) {
     const child = spawn("docker", ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"], {
       cwd: process.cwd(),
       env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    child.once("exit", (code) => code === 0 ? resolvePromise(undefined) : reject(new Error("Unable to clean smoke Compose project")));
-    child.once("error", reject);
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk); });
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      error ? reject(error) : resolvePromise(undefined);
+    };
+    child.once("error", (error) => finish(error));
+    child.once("close", (code, signal) => finish(code === 0
+      ? undefined
+      : new Error(`Unable to clean smoke Compose project (code=${String(code)} signal=${String(signal)}): ${stderr.trim() || stdout.trim()}`)));
   });
 }
 
@@ -521,7 +694,7 @@ function apiBootstrapSource() {
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    await app.listen({ host: "127.0.0.1", port: Number.parseInt(process.env.PORT ?? "0", 10) });
+    await app.listen({ host: "0.0.0.0", port: Number.parseInt(process.env.PORT ?? "0", 10) });
   `;
 }
 
@@ -554,8 +727,8 @@ class ApiProcess {
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk); });
-    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk); });
+    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
     this.exitPromise = new Promise((resolve) => {
       this.child.once("exit", (code, signal) => {
         this.exitInfo = { code, signal };
@@ -583,7 +756,7 @@ class ApiProcess {
     const info = this.exitInfo;
     const summary = `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
     const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
-    return output ? `${summary}\n${redact(output, this.secrets)}` : summary;
+    return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
   }
 
   async stop() {
@@ -635,8 +808,7 @@ class RunnerProcess {
       "--rm",
       "--no-deps",
       "--volume",
-      `${config.controlPlaneRoot}:${config.controlPlaneRoot}`,
-      ...(config.piExecutable.startsWith("/") ? ["--volume", `${config.piExecutable}:${config.piExecutable}:ro`] : []),
+      `${config.workspaceRoots}:${config.workspaceRoots}`,
       ...environmentNames.flatMap((name) => ["--env", name]),
       "hosted-runner",
       "node",
@@ -649,8 +821,8 @@ class RunnerProcess {
     });
     this.child.stdout.setEncoding("utf8");
     this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk); });
-    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk); });
+    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
     this.exitPromise = new Promise((resolve) => {
       this.child.once("exit", (code, signal) => {
         this.exitInfo = { code, signal };
@@ -663,7 +835,7 @@ class RunnerProcess {
     const info = this.exitInfo;
     const summary = `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
     const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
-    return output ? `${summary}\n${redact(output, this.secrets)}` : summary;
+    return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
   }
 
   async expectCleanExit(timeoutMs, context) {
@@ -990,6 +1162,13 @@ function randomToken() {
 
 function allowlistedHostEnvironment(environment) {
   const allowedNames = [
+    "DOCKER_API_VERSION",
+    "DOCKER_CERT_PATH",
+    "DOCKER_CONFIG",
+    "DOCKER_CONTEXT",
+    "DOCKER_HOST",
+    "DOCKER_TLS",
+    "DOCKER_TLS_VERIFY",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -1003,6 +1182,7 @@ function allowlistedHostEnvironment(environment) {
     "TMPDIR",
     "TZ",
     "USER",
+    "XDG_RUNTIME_DIR",
   ];
   return Object.fromEntries(
     allowedNames.flatMap((name) => environment[name] === undefined ? [] : [[name, environment[name]]]),
@@ -1015,16 +1195,27 @@ async function readIncomingMessage(stream) {
   return body || stream.statusMessage || "no response body";
 }
 
-function appendBoundedDiagnostic(current, chunk) {
-  const encoded = Buffer.from(current + String(chunk));
-  if (encoded.byteLength <= maxDiagnosticBytes) return encoded.toString("utf8");
-  let start = encoded.byteLength - maxDiagnosticBytes;
-  while (start < encoded.byteLength && (encoded[start] & 0xc0) === 0x80) start += 1;
-  return encoded.subarray(start).toString("utf8");
+function appendBoundedDiagnostic(current, chunk, secrets) {
+  const longestSecretBytes = secrets
+    .filter(Boolean)
+    .reduce((maximum, secret) => Math.max(maximum, Buffer.byteLength(secret)), 0);
+  return boundedUtf8Tail(current + String(chunk), maxDiagnosticBytes + longestSecretBytes);
 }
 
-function redact(text, secrets) {
-  return secrets.filter(Boolean).reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
+function redactBoundedDiagnostic(text, secrets) {
+  const redacted = [...secrets]
+    .filter(Boolean)
+    .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left))
+    .reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
+  return boundedUtf8Tail(redacted, maxDiagnosticBytes);
+}
+
+function boundedUtf8Tail(text, maxBytes) {
+  const encoded = Buffer.from(text);
+  if (encoded.byteLength <= maxBytes) return encoded.toString("utf8");
+  let start = encoded.byteLength - maxBytes;
+  while (start < encoded.byteLength && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
 }
 
 function delay(milliseconds) {

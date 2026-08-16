@@ -1042,7 +1042,13 @@ export class ControlPlaneStore {
     return { items, nextCursor: hasMore && last ? encodeListCursor(last.createdAt, last.id) : null };
   }
 
-  createHostedSession(ownerId: string, workspaceId: string, idempotencyKey: string, now: Date): HostedSession {
+  createHostedSession(
+    ownerId: string,
+    workspaceId: string,
+    idempotencyKey: string,
+    now: Date,
+    workspaceRuntimeActive = false,
+  ): HostedSession {
     const timestamp = now.toISOString();
     return this.transaction(() => {
       this.requireWorkspace(ownerId, workspaceId);
@@ -1050,6 +1056,9 @@ export class ControlPlaneStore {
         .prepare("SELECT entity_id FROM idempotency_keys WHERE owner_id = ? AND scope = ? AND key = ?")
         .get(ownerId, `create-session:${workspaceId}`, idempotencyKey) as { entity_id: string } | undefined;
       if (prior) return this.requireHostedSession(ownerId, prior.entity_id);
+      if (workspaceRuntimeActive) {
+        throw conflict("workspace_runtime_active", "Workspace runtime is still stopping");
+      }
       const active = this.database
         .prepare("SELECT id FROM hosted_sessions WHERE workspace_id = ? AND state IN ('queued','starting','running') LIMIT 1")
         .get(workspaceId);
@@ -1227,8 +1236,9 @@ export class ControlPlaneStore {
   /** Atomically consumes the assignment token that opens a hosted session's single internal tunnel. */
   authorizeRuntimeAssignment(sessionId: string, tokenDigestValue: string, now: Date): { assignmentId: string; session: HostedSession; workspace: Workspace } | undefined {
     return this.transaction(() => {
-      const session = this.requireHostedSessionInternal(sessionId);
-      if (session.state !== "starting") return undefined;
+      const sessionRow = this.database.prepare("SELECT * FROM hosted_sessions WHERE id = ?").get(sessionId) as HostedSessionRow | undefined;
+      if (!sessionRow || sessionRow.state !== "starting") return undefined;
+      const session = mapHostedSession(sessionRow);
       const timestamp = now.toISOString();
       const consumed = this.database
         .prepare(
@@ -1275,6 +1285,23 @@ export class ControlPlaneStore {
     this.database
       .prepare("UPDATE runtime_assignments SET last_heartbeat_at = ? WHERE id = ? AND stopped_at IS NULL")
       .run(now.toISOString(), assignmentId);
+  }
+
+  /** Rechecks durable authority after WebSocket upgrade hooks and lifecycle requests race. */
+  isHostedRuntimeAssignmentAttachable(assignmentId: string, sessionId: string): boolean {
+    return this.database
+      .prepare(
+        `SELECT 1 FROM runtime_assignments
+         JOIN hosted_sessions ON hosted_sessions.id = runtime_assignments.hosted_session_id
+         WHERE runtime_assignments.id = ? AND runtime_assignments.hosted_session_id = ?
+           AND runtime_assignments.stopped_at IS NULL AND hosted_sessions.state = 'starting'`,
+      )
+      .get(assignmentId, sessionId) !== undefined;
+  }
+
+  /** Rechecks the durable session state before an upgraded public socket starts routing commands. */
+  isHostedSessionRunning(sessionId: string): boolean {
+    return this.database.prepare("SELECT 1 FROM hosted_sessions WHERE id = ? AND state = 'running'").get(sessionId) !== undefined;
   }
 
   private requireHostedSessionInternal(sessionId: string): HostedSession {

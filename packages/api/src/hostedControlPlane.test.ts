@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomUUID } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import test from "node:test";
 import { hostedRuntimeLaunchSchema } from "@pi-cloud/contracts";
 import type { ApiConfig } from "./config.js";
@@ -265,8 +265,8 @@ test("a connected starting runtime is not expired while checkout heartbeats cont
   assert.equal(controlPlane.getHostedSession(principal, session.id).state, "starting");
 });
 
-test("stopping a session with a live runtime tunnel sends the out-of-band pi_cloud_stop control", () => {
-  const { controlPlane } = newControlPlane();
+test("stopping a session closes late client upgrades and blocks another session in that workspace", () => {
+  const { controlPlane, store } = newControlPlane();
   const workspace = controlPlane.createWorkspace(
     principal,
     { repositoryUrl: "https://github.com/pi-cloud/example", revision },
@@ -275,17 +275,59 @@ test("stopping a session with a live runtime tunnel sends the out-of-band pi_clo
   const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-stop");
   const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-1" });
   assert.ok(claimed);
+  const assignment = controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token);
   const sent: unknown[] = [];
   controlPlane.router.attachRuntime({
     sessionId: session.id,
-    assignmentId: randomUUID(),
+    assignmentId: assignment.assignmentId,
     workspaceRoot: workspace.root,
     limits: config().hostedLaunchLimits,
     socket: { readyState: 1, send: (payload: string) => sent.push(JSON.parse(payload)), on: () => undefined, once: () => undefined } as never,
   });
 
+  store.markHostedSessionRunning(session.id, new Date());
+  controlPlane.authorizeClientConnection(principal, session.id);
   const stopped = controlPlane.stopHostedSession(principal, session.id);
   assert.equal(stopped.state, "stopped");
+  const clientCloses: Array<{ code: number; reason: string }> = [];
+  controlPlane.router.attachClient(session.id, {
+    readyState: 1,
+    close: (code: number, reason: string) => clientCloses.push({ code, reason }),
+  } as never);
+  assert.deepEqual(clientCloses, [{ code: 4410, reason: "hosted runtime disconnected before client attachment" }]);
   assert.throws(() => controlPlane.archiveHostedSession(principal, session.id), /still stopping/);
+  assert.throws(
+    () => controlPlane.createHostedSession(principal, workspace.id, {}, "session-stop-replacement"),
+    /runtime is still stopping/,
+  );
   assert.deepEqual(sent, [{ type: "pi_cloud_stop" }]);
+});
+
+test("a tunnel upgrade cannot attach after its assignment was stopped", () => {
+  const { controlPlane } = newControlPlane();
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-upgrade-stop-race",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-upgrade-stop-race");
+  const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-1" });
+  assert.ok(claimed);
+  const assignment = controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token);
+  controlPlane.stopHostedSession(principal, session.id);
+
+  const closes: Array<{ code: number; reason: string }> = [];
+  controlPlane.router.attachRuntime({
+    sessionId: session.id,
+    assignmentId: assignment.assignmentId,
+    workspaceRoot: workspace.root,
+    limits: config().hostedLaunchLimits,
+    socket: {
+      readyState: 1,
+      close: (code: number, reason: string) => closes.push({ code, reason }),
+    } as never,
+  });
+
+  assert.equal(controlPlane.router.hasRuntime(session.id), false);
+  assert.deepEqual(closes, [{ code: 4410, reason: "hosted runtime assignment is no longer active" }]);
 });

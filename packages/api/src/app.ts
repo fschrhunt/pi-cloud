@@ -30,7 +30,13 @@ const idParamsSchema = z.object({
 export async function buildApp(config: ApiConfig, clock?: () => Date) {
   const app = Fastify({
     logger: {
-      redact: ["req.headers.authorization", "req.headers['x-api-key']", "headers.authorization"],
+      redact: [
+        "req.headers.authorization",
+        "req.headers['x-api-key']",
+        "req.headers['sec-websocket-protocol']",
+        "headers.authorization",
+        "headers['sec-websocket-protocol']",
+      ],
     },
   });
   const controlPlane = new ControlPlane(config, clock);
@@ -38,7 +44,12 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
   const authenticator = new Authenticator(config.apiCredentials);
 
   await app.register(cors, { origin: false });
-  await app.register(websocket, { options: { maxPayload: config.hostedLaunchLimits.maxRecordBytes } });
+  await app.register(websocket, {
+    options: {
+      maxPayload: config.hostedLaunchLimits.maxRecordBytes,
+      handleProtocols: (protocols) => protocols.has("pi-cloud-rpc") ? "pi-cloud-rpc" : false,
+    },
+  });
   app.addHook("preClose", async () => hostedControlPlane.close());
   app.addHook("onClose", async () => controlPlane.close());
 
@@ -188,14 +199,25 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
     return hostedControlPlane.archiveHostedSession(principal(request.headers.authorization), required(sessionId));
   });
 
+  app.post("/v1/hosted-sessions/:sessionId/rpc-ticket", async (request, reply) => {
+    const { sessionId } = idParamsSchema.parse(request.params);
+    const ticket = hostedControlPlane.issueClientTicket(
+      principal(request.headers.authorization),
+      required(sessionId),
+    );
+    return reply.code(201).send(ticket);
+  });
+
   app.get(
     "/v1/hosted-sessions/:sessionId/rpc",
     {
       websocket: true,
       preHandler: async (request) => {
         const { sessionId } = idParamsSchema.parse(request.params);
-        const caller = principal(request.headers.authorization);
-        request.hostedClientSession = hostedControlPlane.authorizeClientConnection(caller, required(sessionId));
+        const id = required(sessionId);
+        request.hostedClientSession = request.headers.authorization
+          ? hostedControlPlane.authorizeClientConnection(principal(request.headers.authorization), id)
+          : hostedControlPlane.authorizeClientTicket(id, browserAttachmentTicket(request.headers["sec-websocket-protocol"]));
       },
     },
     (socket: WebSocket, request) => {
@@ -333,6 +355,14 @@ function requireDispatcher(authorization: string | undefined, expected: string):
 function required(value: string | undefined): string {
   if (!value) throw new ApiError(400, "invalid_request", "Required identifier is missing");
   return value;
+}
+
+function browserAttachmentTicket(protocolHeader: string | string[] | undefined): string | undefined {
+  const protocols = (Array.isArray(protocolHeader) ? protocolHeader.join(",") : protocolHeader ?? "")
+    .split(",")
+    .map((value) => value.trim());
+  if (!protocols.includes("pi-cloud-rpc")) return undefined;
+  return protocols.find((value) => value.startsWith("pi-cloud-ticket."))?.slice("pi-cloud-ticket.".length);
 }
 
 function delay(milliseconds: number): Promise<void> {

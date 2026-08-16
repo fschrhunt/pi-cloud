@@ -29,8 +29,8 @@ export async function prepareIsolatedWorkspace(launch: HostedRuntimeLaunch): Pro
   }
 
   const identity = workspaceProcessIdentity(launch.workspaceId);
-  await killWorkspaceProcesses(identity);
   await rejectIdentityCollision(dirname(storageRoot), basename(storageRoot), identity.uid);
+  await killWorkspaceProcesses(identity);
   await Promise.all([
     fs.mkdir(launch.workspaceRoot, { recursive: true }),
     fs.mkdir(sessionDirectory, { recursive: true }),

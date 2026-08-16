@@ -37,7 +37,7 @@ HTTP handles create, list, get, start, stop, and archive operations. Authenticat
 
 `packages/runner` opens one authorized workspace, receives only that workspace's API-resolved credentials in its claim, starts the installed Pi CLI in RPC mode, and relays LF-delimited JSONL records.
 
-The trusted worker supervisor is disposable. It retains dispatcher authority, assigns each workspace a distinct operating-system UID, and starts untrusted Pi under that identity. Workspace storage roots are mode `0700`, so Pi cannot inspect the supervisor or sibling repositories and native sessions. A replacement worker derives the same UID and resumes the native session through Pi's CLI and RPC operations. Operator Pi resources are read-only; each hosted session gets separate writable home and temporary directories beside its native session data.
+The trusted worker supervisor is disposable. It retains dispatcher authority, assigns each workspace a distinct operating-system UID, and starts untrusted Pi under that identity. Workspace storage roots are mode `0700`, so Pi cannot inspect the supervisor or sibling repositories and native sessions. A replacement worker derives the same UID and resumes the native session through Pi's CLI and RPC operations. Operator Pi resources are a reviewed, read-only, non-secret view; persisted provider authentication stays outside that view and arrives only through scoped claims. Each hosted session gets separate writable home and temporary directories beside its native session data.
 
 ## Workspace
 

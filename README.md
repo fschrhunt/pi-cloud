@@ -68,7 +68,7 @@ A small trusted Pi package supplies hosted capabilities that are not part of the
 The current pre-alpha slice includes:
 
 - authenticated, SQLite-backed workspace, hosted-session, agent, run, and lifecycle metadata;
-- atomic dispatch, single-use leases, and authenticated public and internal hosted-runtime WebSockets;
+- atomic dispatch, single-use leases, browser attachment tickets, and authenticated public and internal hosted-runtime WebSockets;
 - exact-revision checkout, persistent workspaces, native Pi session resume, and scoped credential references;
 - bounded hosted RPC envelopes, LF JSONL Pi supervision, reconnect, stop, restart, and redaction of configured secrets;
 - a local single-operator Docker baseline and a hosted runtime smoke command.
@@ -83,7 +83,7 @@ See [docs/hosted-runtime.md](docs/hosted-runtime.md) for the operator contract. 
 
 - Node.js 22.19 or newer
 - npm 11 or newer
-- Docker for the runner image and local smoke test
+- Docker only for the runner image and local smoke test; checks, builds, API development, and unit tests do not need a running daemon
 
 Install dependencies:
 
@@ -95,6 +95,7 @@ Start the current control plane:
 
 ```bash
 eval "$(node scripts/create-development-keys.mjs)"
+export PI_CLOUD_PUBLIC_BASE_URL="http://host.docker.internal:3000"
 export PI_CLOUD_DISPATCHER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_USER_TOKEN="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64url"))')"
 export PI_CLOUD_API_CREDENTIALS="[{\"token\":\"$PI_CLOUD_USER_TOKEN\",\"subjectId\":\"local-user\",\"type\":\"user\",\"displayName\":\"Local User\"}]"
@@ -123,7 +124,17 @@ Run the hosted runtime smoke flow against a dedicated temporary API and a real H
 npm run smoke:hosted
 ```
 
-It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and valid Pi model credentials/settings in the configured operator agent directory. The command builds an isolated runner image and removes its temporary API database, containers, volumes, and runtime roots on every exit.
+It requires the repository, revision, and optional credential-reference variables from [.env.example](.env.example), built API and runner packages (`npm run build`), Docker Compose, and a sanitized, non-secret Pi resource directory readable by isolated workspace UIDs. The command builds an isolated runner image and removes its temporary API database, containers, volumes, and runtime roots after success, failure, or termination signals.
+
+On a 16 GiB Apple Silicon development Mac, an on-demand Colima VM with four CPUs, four GiB of memory, and a 60 GiB sparse disk leaves enough host headroom while accommodating the Compose runner's two GiB limit:
+
+```bash
+colima start --cpu 4 --memory 4 --disk 60
+npm run smoke:hosted
+colima stop
+```
+
+Do not register Colima as a Homebrew service when Docker is needed only for smoke tests. `docker system df` reports VM storage use; `docker builder prune` removes reproducible build cache when needed. Avoid pruning volumes casually because the local Compose provider deliberately stores workspaces and native sessions in a Docker volume.
 
 ## Repository
 

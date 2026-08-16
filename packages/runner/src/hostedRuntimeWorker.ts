@@ -101,7 +101,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   let socket: WebSocket;
   try {
     socket = (options.createWebSocket ?? createAuthenticatedWebSocket)(claim.tunnel.url, claim.tunnel.token);
-    await waitForOpen(socket);
+    await waitForOpen(socket, options.signal);
   } catch (error: unknown) {
     scrubResolvedCredentials(credentials);
     throw error;
@@ -170,7 +170,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   heartbeatTimer.unref();
 
   try {
-    const checkedOut = await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity);
+    const checkedOut = await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity, options.signal);
     if (processIdentity && checkedOut) await applyWorkspaceOwnership(launch, processIdentity);
     supervisor = new PiRpcSupervisor({
       launch,
@@ -253,6 +253,7 @@ async function materializeRepository(
   launch: HostedRuntimeLaunch,
   checkout: typeof checkoutExactRevision,
   processIdentity?: RuntimeProcessIdentity,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const gitDirectory = `${launch.workspaceRoot}/.git`;
   let existingRepository = false;
@@ -269,6 +270,7 @@ async function materializeRepository(
       shell: false as const,
       timeout: 30_000,
       env: isolatedGitEnvironment(launch),
+      signal,
       ...(processIdentity ?? {}),
     };
     const safeGit = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
@@ -294,7 +296,7 @@ async function materializeRepository(
     revision: launch.repository.revision,
     source: { kind: "https-url", repositoryUrl: launch.repository.repositoryUrl },
     scratchRoot: dirname(launch.workspaceRoot),
-  }, { processIdentity });
+  }, { processIdentity, signal });
   return true;
 }
 
@@ -343,11 +345,32 @@ function scrubClaimCredentials(claim: HostedRuntimeClaim): void {
   for (const credential of claim.credentials) credential.value = "";
 }
 
-function waitForOpen(socket: WebSocket): Promise<void> {
+function waitForOpen(socket: WebSocket, signal?: AbortSignal): Promise<void> {
   if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    socket.once("open", resolve);
-    socket.once("error", reject);
+    const cleanup = () => {
+      socket.off("open", onOpen);
+      socket.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onAbort = () => {
+      cleanup();
+      socket.once("error", () => undefined);
+      socket.terminate();
+      reject(new Error("Hosted runtime startup aborted"));
+    };
+    socket.once("open", onOpen);
+    socket.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
   });
 }
 

@@ -8,7 +8,7 @@ Pi Cloud requires Node 22.19 or newer, which also satisfies `node:sqlite`. Migra
 
 ## Authentication
 
-`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` routes require one of those tokens and constrain every agent, run, workspace, hosted session, RPC attachment, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned.
+`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` HTTP routes require one of those tokens and constrain every agent, run, workspace, hosted session, RPC attachment, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned. Non-browser RPC clients may authenticate the WebSocket upgrade with the same bearer; browser clients exchange it over authenticated HTTP for a 60-second, single-use, session-scoped attachment ticket carried in the WebSocket subprotocol header.
 
 `PI_CLOUD_DISPATCHER_TOKEN` protects claim and recovery operations. A claimed runner receives a signed lease once. Redemption verifies its signature, expiry, audience, task, and assigned runner, then atomically marks it consumed. Later runner requests prove possession against the stored token hash, so heartbeats can extend assignment liveness without changing the signed lease's five-minute redemption lifetime.
 

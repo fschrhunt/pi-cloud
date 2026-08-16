@@ -43,8 +43,8 @@ type Fixture = {
   workspaceRoot: string;
 };
 
-async function setup(): Promise<Fixture> {
-  const app = await buildApp(config());
+async function setup(clock?: () => Date): Promise<Fixture> {
+  const app = await buildApp(config(), clock);
   const address = await app.listen({ host: "127.0.0.1", port: 0 });
   const port = Number(new URL(address).port);
 
@@ -88,6 +88,13 @@ function connectClient(fixture: Fixture, token: string): WebSocket {
   return new WebSocket(`ws://127.0.0.1:${fixture.port}/v1/hosted-sessions/${fixture.sessionId}/rpc`, {
     headers: { authorization: `Bearer ${token}` },
   });
+}
+
+function connectBrowserClient(fixture: Fixture, ticket: string, sessionId = fixture.sessionId): WebSocket {
+  return new WebSocket(
+    `ws://127.0.0.1:${fixture.port}/v1/hosted-sessions/${sessionId}/rpc`,
+    [`pi-cloud-ticket.${ticket}`, "pi-cloud-rpc"],
+  );
 }
 
 function waitFor<Args extends unknown[]>(socket: WebSocket, event: "open" | "message" | "close" | "unexpected-response"): Promise<Args> {
@@ -227,6 +234,81 @@ test("hosted RPC tunnel routes an authenticated prompt to the runtime and its re
   ).json();
   assert.equal(finalState.state, "stopped");
 
+  await app.close();
+});
+
+test("browser clients attach with a short-lived single-use WebSocket subprotocol ticket", async () => {
+  const fixture = await setup();
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const forbiddenTicket = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${otherToken}` },
+  });
+  assert.equal(forbiddenTicket.statusCode, 404);
+
+  const ticketResponse = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(ticketResponse.statusCode, 201);
+  const ticket = ticketResponse.json<{ ticket: string; expiresAt: string }>();
+  assert.match(ticket.ticket, /^[A-Za-z0-9_-]{43}$/u);
+  assert.ok(Date.parse(ticket.expiresAt) > Date.now());
+
+  const bogusTicket = connectBrowserClient(fixture, "x".repeat(43));
+  const [, bogusResponse] = await waitFor<[unknown, { statusCode: number }]>(bogusTicket, "unexpected-response");
+  assert.equal(bogusResponse.statusCode, 401);
+
+  const crossSessionTicket = connectBrowserClient(fixture, ticket.ticket, "00000000-0000-0000-0000-000000000000");
+  const [, crossSessionResponse] = await waitFor<[unknown, { statusCode: number }]>(crossSessionTicket, "unexpected-response");
+  assert.equal(crossSessionResponse.statusCode, 401);
+
+  const browserClient = connectBrowserClient(fixture, ticket.ticket);
+  await waitFor(browserClient, "open");
+  assert.equal(browserClient.protocol, "pi-cloud-rpc");
+  browserClient.close();
+  await waitFor(browserClient, "close");
+
+  const reusedTicket = connectBrowserClient(fixture, ticket.ticket);
+  const [, reusedResponse] = await waitFor<[unknown, { statusCode: number }]>(reusedTicket, "unexpected-response");
+  assert.equal(reusedResponse.statusCode, 401);
+
+  await closeAll(runtime);
+  await app.close();
+});
+
+test("browser attachment tickets expire before WebSocket use", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const fixture = await setup(() => now);
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const response = await app.inject({
+    method: "POST",
+    url: `/v1/hosted-sessions/${sessionId}/rpc-ticket`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(response.statusCode, 201);
+  const { ticket } = response.json<{ ticket: string }>();
+  now = new Date("2026-01-01T00:01:01.000Z");
+
+  const expired = connectBrowserClient(fixture, ticket);
+  const [, expiredResponse] = await waitFor<[unknown, { statusCode: number }]>(expired, "unexpected-response");
+  assert.equal(expiredResponse.statusCode, 401);
+
+  await closeAll(runtime);
   await app.close();
 });
 

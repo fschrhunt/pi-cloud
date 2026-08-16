@@ -34,6 +34,8 @@ async function main() {
   let cleanupPromise;
   let mainError;
   let terminating = false;
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let buildChild;
 
   const cleanup = () => {
     cleanupPromise ??= config
@@ -53,6 +55,7 @@ async function main() {
   const terminate = (signal) => {
     if (terminating) return;
     terminating = true;
+    buildChild?.kill("SIGTERM");
     void cleanup()
       .catch((error) => console.error(`Smoke cleanup failed after ${signal}: ${error instanceof Error ? error.message : String(error)}`))
       .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
@@ -69,8 +72,10 @@ async function main() {
     assertDockerAvailable();
     await assertHostedAgentDirectory(config.operatorAgentDirectory);
     composeTouched = true;
-    buildSmokeRunnerImage(config);
+    await buildSmokeRunnerImage(config, (child) => { buildChild = child; });
+    buildChild = undefined;
     await ensureRuntimeRoots(config);
+    await reserveApiEndpoints(config);
 
     api = new ApiProcess(config);
     await api.waitForHealth(30_000);
@@ -180,9 +185,6 @@ async function readConfig(env, controlPlaneRoot) {
   const hostedCredentials = parseHostedCredentialValues(env.PI_CLOUD_HOSTED_CREDENTIALS, hostedCredentialReferences);
 
   try {
-    const apiPort = await reserveUnusedLoopbackPort();
-    const apiBaseUrl = parseUrl(`http://127.0.0.1:${apiPort}`, "generated API base URL");
-    const runnerDispatcherUrl = parseUrl(`http://host.docker.internal:${apiPort}`, "container API base URL");
     const operatorAgentDirectory = resolve(
       env.PI_CLOUD_SMOKE_AGENT_DIRECTORY ?? env.PI_CLOUD_HOST_AGENT_DIRECTORY ?? "data/pi-agent",
     );
@@ -198,8 +200,6 @@ async function readConfig(env, controlPlaneRoot) {
       : undefined;
 
     return {
-      apiBaseUrl,
-      apiPort,
       repositoryUrl,
       revision,
       projectTrust: parseProjectTrust(env.PI_CLOUD_SMOKE_PROJECT_TRUST),
@@ -209,7 +209,6 @@ async function readConfig(env, controlPlaneRoot) {
       dispatcherToken,
       taskLeasePrivateKey,
       apiCredentialsJson,
-      runnerDispatcherUrl,
       runnerIdBase: `smoke-hosted-${process.pid}-${randomUUID()}`,
       composeProject: `pi-cloud-smoke-${process.pid}`,
       controlPlaneRoot,
@@ -379,14 +378,20 @@ async function ensureRuntimeRoots(config) {
   }
 }
 
-function buildSmokeRunnerImage(config) {
-  const result = spawnSync("docker", ["compose", "--project-name", config.composeProject, "build", "hosted-runner"], {
-    cwd: process.cwd(),
-    env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
-    encoding: "utf8",
-    timeout: 240_000,
+/** Builds the runner image without blocking the event loop so termination signals stay responsive. */
+async function buildSmokeRunnerImage(config, onSpawn) {
+  await runDockerCommand(config, ["compose", "--project-name", config.composeProject, "build", "hosted-runner"], {
+    timeoutMs: 240_000,
+    failureMessage: "Unable to build isolated smoke runner image",
+    onSpawn,
   });
-  if (result.status !== 0) throw new Error(`Unable to build isolated smoke runner image: ${result.stderr.trim()}`);
+}
+
+/** Reserves the dedicated API port only now, immediately before startup, so the long image build cannot widen the port-reuse race. */
+async function reserveApiEndpoints(config) {
+  config.apiPort = await reserveUnusedLoopbackPort();
+  config.apiBaseUrl = parseUrl(`http://127.0.0.1:${config.apiPort}`, "generated API base URL");
+  config.runnerDispatcherUrl = parseUrl(`http://host.docker.internal:${config.apiPort}`, "container API base URL");
 }
 
 /** Fails before provisioning when the Docker CLI, Compose plugin, or daemon is unavailable. */
@@ -479,19 +484,25 @@ async function runSmokeComposeUtility(config, source, args, mountMode) {
     source,
     ...args,
   ];
+  await runDockerCommand(config, command, { timeoutMs: 60_000, failureMessage: "Smoke utility failed" });
+}
+
+/** Runs one Docker CLI command to completion with bounded, redacted diagnostics; onSpawn exposes the child for termination. */
+async function runDockerCommand(config, args, { timeoutMs, failureMessage, onSpawn } = {}) {
   await new Promise((resolvePromise, reject) => {
-    const child = spawn("docker", command, {
+    const child = spawn("docker", args, {
       cwd: process.cwd(),
       env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
       stdio: ["ignore", "pipe", "pipe"],
     });
+    onSpawn?.(child);
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
-    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
-    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
+    child.stderr?.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
+    const timer = timeoutMs === undefined ? undefined : setTimeout(() => child.kill("SIGKILL"), timeoutMs);
     let settled = false;
     const finish = (error) => {
       if (settled) return;
@@ -503,7 +514,7 @@ async function runSmokeComposeUtility(config, source, args, mountMode) {
     child.once("close", (code, signal) => finish(code === 0
       ? undefined
       : new Error(
-        `Smoke utility failed with code=${String(code)} signal=${String(signal)}: ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
+        `${failureMessage} (code=${String(code)} signal=${String(signal)}): ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
       )));
   });
 }
@@ -529,31 +540,11 @@ async function cleanupSmokeResources({ config, clients, runners, api, composeTou
 }
 
 async function cleanupSmokeCompose(config) {
-  await new Promise((resolvePromise, reject) => {
-    const child = spawn("docker", ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"], {
-      cwd: process.cwd(),
-      env: { ...allowlistedHostEnvironment(process.env), PI_CLOUD_HOST_AGENT_DIRECTORY: config.operatorAgentDirectory },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { stdout = appendBoundedDiagnostic(stdout, chunk, config.secrets); });
-    child.stderr.on("data", (chunk) => { stderr = appendBoundedDiagnostic(stderr, chunk, config.secrets); });
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      error ? reject(error) : resolvePromise(undefined);
-    };
-    child.once("error", (error) => finish(error));
-    child.once("close", (code, signal) => finish(code === 0
-      ? undefined
-      : new Error(
-        `Unable to clean smoke Compose project (code=${String(code)} signal=${String(signal)}): ${redactBoundedDiagnostic(stderr.trim() || stdout.trim(), config.secrets)}`,
-      )));
-  });
+  await runDockerCommand(
+    config,
+    ["compose", "--project-name", config.composeProject, "down", "--volumes", "--remove-orphans"],
+    { failureMessage: "Unable to clean smoke Compose project" },
+  );
 }
 
 async function createWorkspace(config) {
@@ -734,15 +725,18 @@ class ApiProcess {
       env: childEnvironment,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    this.child.stdout.setEncoding("utf8");
-    this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
-    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
+    this.child.stdout?.setEncoding("utf8");
+    this.child.stderr?.setEncoding("utf8");
+    this.child.stdout?.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr?.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
     this.exitPromise = new Promise((resolve) => {
-      this.child.once("exit", (code, signal) => {
-        this.exitInfo = { code, signal };
-        resolve(this.exitInfo);
-      });
+      const settle = (info) => {
+        if (this.exitInfo) return;
+        this.exitInfo = info;
+        resolve(info);
+      };
+      this.child.once("error", (error) => settle({ code: null, signal: null, spawnError: error.message }));
+      this.child.once("exit", (code, signal) => settle({ code, signal }));
     });
   }
 
@@ -763,7 +757,9 @@ class ApiProcess {
 
   describeExit() {
     const info = this.exitInfo;
-    const summary = `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
+    const summary = info?.spawnError
+      ? `spawn failed: ${info.spawnError}`
+      : `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
     const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
     return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
   }
@@ -828,21 +824,26 @@ class RunnerProcess {
       env: childEnvironment,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    this.child.stdout.setEncoding("utf8");
-    this.child.stderr.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
-    this.child.stderr.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
+    this.child.stdout?.setEncoding("utf8");
+    this.child.stderr?.setEncoding("utf8");
+    this.child.stdout?.on("data", (chunk) => { this.stdout = appendBoundedDiagnostic(this.stdout, chunk, this.secrets); });
+    this.child.stderr?.on("data", (chunk) => { this.stderr = appendBoundedDiagnostic(this.stderr, chunk, this.secrets); });
     this.exitPromise = new Promise((resolve) => {
-      this.child.once("exit", (code, signal) => {
-        this.exitInfo = { code, signal };
-        resolve(this.exitInfo);
-      });
+      const settle = (info) => {
+        if (this.exitInfo) return;
+        this.exitInfo = info;
+        resolve(info);
+      };
+      this.child.once("error", (error) => settle({ code: null, signal: null, spawnError: error.message }));
+      this.child.once("exit", (code, signal) => settle({ code, signal }));
     });
   }
 
   describeExit() {
     const info = this.exitInfo;
-    const summary = `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
+    const summary = info?.spawnError
+      ? `spawn failed: ${info.spawnError}`
+      : `exit code=${String(info?.code)} signal=${String(info?.signal)}`;
     const output = [this.stdout.trim(), this.stderr.trim()].filter(Boolean).join("\n");
     return output ? `${summary}\n${redactBoundedDiagnostic(output, this.secrets)}` : summary;
   }

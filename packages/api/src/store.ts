@@ -1641,7 +1641,7 @@ function assertChanged(result: StatementResultingChanges, message: string): void
   if (result.changes !== 1) throw conflict("stale_transition", message);
 }
 
-const listCursorSchema = z.object({ createdAt: z.string().min(1), id: z.uuid() }).strict();
+const listCursorSchema = z.object({ createdAt: z.iso.datetime(), id: z.uuid() }).strict();
 
 /** Decodes a client-owned pagination cursor and rejects malformed values. */
 export function decodeListCursor(cursor: string): { createdAt: string; id: string } {

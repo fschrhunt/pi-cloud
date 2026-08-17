@@ -1231,11 +1231,7 @@ function redactBoundedDiagnostic(text, secrets) {
     .filter(Boolean)
     .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left));
   const redacted = normalizedSecrets.reduce((result, secret) => result.split(secret).join("[REDACTED]"), text);
-  const longestSecretBytes = normalizedSecrets.reduce(
-    (maximum, secret) => Math.max(maximum, Buffer.byteLength(secret)),
-    0,
-  );
-  const boundarySafe = Buffer.byteLength(text) >= maxDiagnosticBytes + longestSecretBytes
+  const boundarySafe = Buffer.byteLength(text) > maxDiagnosticBytes
     ? redactSecretSuffixAtStart(redacted, normalizedSecrets)
     : redacted;
   return boundedUtf8Tail(boundarySafe, maxDiagnosticBytes);

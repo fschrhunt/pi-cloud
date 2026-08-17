@@ -11,7 +11,7 @@ const ownerToken = "owner-token-that-is-at-least-32-characters-long";
 const otherToken = "other-token-that-is-at-least-32-characters-long";
 const revision = "0123456789abcdef0123456789abcdef01234567";
 
-function config(): ApiConfig {
+function config(overrides: Partial<ApiConfig> = {}): ApiConfig {
   return {
     dispatcherToken,
     taskLeasePrivateKey: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
@@ -33,6 +33,7 @@ function config(): ApiConfig {
     },
     hostedCredentialReferences: [],
     hostedCredentialValues: {},
+    ...overrides,
   };
 }
 
@@ -43,8 +44,8 @@ type Fixture = {
   workspaceRoot: string;
 };
 
-async function setup(clock?: () => Date): Promise<Fixture> {
-  const app = await buildApp(config(), clock);
+async function setup(clock?: () => Date, overrides: Partial<ApiConfig> = {}): Promise<Fixture> {
+  const app = await buildApp(config(overrides), clock);
   const address = await app.listen({ host: "127.0.0.1", port: 0 });
   const port = Number(new URL(address).port);
 
@@ -316,6 +317,66 @@ test("browser attachment tickets expire at their stated boundary and newer ticke
   const expired = connectBrowserClient(fixture, expiringTicket);
   const [, expiredResponse] = await waitFor<[unknown, { statusCode: number }]>(expired, "unexpected-response");
   assert.equal(expiredResponse.statusCode, 401);
+
+  await closeAll(runtime);
+  await app.close();
+});
+
+test("client-originated routed byte growth disconnects only the client", async () => {
+  const record = { type: "get_state", id: "x" };
+  const maxRecordBytes = Buffer.byteLength(JSON.stringify({
+    version: 1,
+    hostedSessionId: "00000000-0000-0000-0000-000000000000",
+    direction: "client_to_pi",
+    sequence: 1,
+    record,
+  }), "utf8");
+  const fixture = await setup(undefined, {
+    hostedLaunchLimits: {
+      ...config().hostedLaunchLimits,
+      maxRecordBytes,
+    },
+  });
+  const { app, sessionId } = fixture;
+  const { tunnel } = await claim(app);
+  const runtime = connectRuntime(fixture, tunnel.token);
+  await waitFor(runtime, "open");
+  runtime.send(JSON.stringify({ type: "pi_cloud_runtime_ready" }));
+  await delay(20);
+
+  const firstClient = connectClient(fixture, ownerToken);
+  await waitFor(firstClient, "open");
+  for (let sequence = 1; sequence <= 9; sequence += 1) {
+    firstClient.send(JSON.stringify({ version: 1, hostedSessionId: sessionId, direction: "client_to_pi", sequence, record }));
+    const forwarded = await nextMessage(runtime);
+    assert.equal(forwarded.sequence, sequence);
+  }
+  firstClient.close();
+  await waitFor(firstClient, "close");
+
+  let forwardedAfterFailure = false;
+  runtime.once("message", () => {
+    forwardedAfterFailure = true;
+  });
+  const secondClient = connectClient(fixture, ownerToken);
+  await waitFor(secondClient, "open");
+  secondClient.send(JSON.stringify({ version: 1, hostedSessionId: sessionId, direction: "client_to_pi", sequence: 1, record }));
+  const [closeCode] = await waitFor<[number]>(secondClient, "close");
+  assert.equal(closeCode, 4413);
+  await delay(20);
+  assert.equal(forwardedAfterFailure, false);
+  assert.equal(runtime.readyState, WebSocket.OPEN);
+  const persisted = await app.inject({
+    method: "GET",
+    url: `/v1/hosted-sessions/${sessionId}`,
+    headers: { authorization: `Bearer ${ownerToken}` },
+  });
+  assert.equal(persisted.json().state, "running");
+
+  const thirdClient = connectClient(fixture, ownerToken);
+  await waitFor(thirdClient, "open");
+  thirdClient.close();
+  await waitFor(thirdClient, "close");
 
   await closeAll(runtime);
   await app.close();

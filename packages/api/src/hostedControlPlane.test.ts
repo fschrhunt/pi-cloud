@@ -151,6 +151,41 @@ test("claiming a hosted runtime is atomic, mints a validated launch, and derives
   assert.throws(() => controlPlane.authorizeRuntimeAssignment(session.id, "wrong-token"), /Unauthorized/);
 });
 
+test("hosted runtime claims preserve the configured public base path prefix", () => {
+  const { controlPlane } = newControlPlane({ publicBaseUrl: "https://pi-cloud.example.com/base/prefix/" });
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-claim-path-prefix",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-claim-path-prefix");
+  const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-1" });
+  assert.ok(claimed);
+  assert.equal(
+    claimed.tunnel.url,
+    `wss://pi-cloud.example.com/base/prefix/internal/v1/hosted-sessions/${session.id}/tunnel`,
+  );
+});
+
+test("an invalid hosted runtime claim leaves the session queued and returns a safe error", () => {
+  const { controlPlane } = newControlPlane({ hostedCredentialValues: {} });
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision, credentialReferenceNames: ["provider"] },
+    "workspace-claim-invalid",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-claim-invalid");
+  assert.throws(
+    () => controlPlane.claimHostedRuntime({ runnerId: "runner-1" }),
+    (error: { code?: string; message?: string }) => {
+      assert.equal(error.code, "hosted_runtime_claim_invalid");
+      assert.match(error.message ?? "", /PI_CLOUD_HOSTED_CREDENTIALS/);
+      return true;
+    },
+  );
+  assert.equal(controlPlane.getHostedSession(principal, session.id).state, "queued");
+});
+
 test("a runtime disconnect closes its assignment after an explicit stop so the session can start again", () => {
   const { controlPlane, store } = newControlPlane();
   const workspace = controlPlane.createWorkspace(
@@ -263,6 +298,70 @@ test("a connected starting runtime is not expired while checkout heartbeats cont
   now = new Date("2026-01-01T00:01:01.000Z");
   assert.equal(controlPlane.claimHostedRuntime({ runnerId: "runner-other" }), undefined);
   assert.equal(controlPlane.getHostedSession(principal, session.id).state, "starting");
+});
+
+test("dead public clients release the attachment slot without stopping the runtime", () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { controlPlane, store } = newControlPlane({}, () => now);
+  const workspace = controlPlane.createWorkspace(
+    principal,
+    { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+    "workspace-client-liveness",
+  );
+  const session = controlPlane.createHostedSession(principal, workspace.id, {}, "session-client-liveness");
+  const claimed = controlPlane.claimHostedRuntime({ runnerId: "runner-1" });
+  assert.ok(claimed);
+  const assignment = controlPlane.authorizeRuntimeAssignment(session.id, claimed.tunnel.token);
+
+  controlPlane.router.attachRuntime({
+    sessionId: session.id,
+    assignmentId: assignment.assignmentId,
+    workspaceRoot: workspace.root,
+    limits: config().hostedLaunchLimits,
+    socket: { readyState: 1, send: () => undefined, on: () => undefined, once: () => undefined, close: () => undefined } as never,
+  });
+  store.markHostedSessionRunning(session.id, now);
+
+  let pingCount = 0;
+  let terminateCount = 0;
+  controlPlane.router.attachClient(session.id, {
+    readyState: 1,
+    send: () => undefined,
+    on: (event: string, handler: () => void) => {
+      if (event === "pong") void handler;
+    },
+    once: () => undefined,
+    close: () => undefined,
+    ping: () => {
+      pingCount += 1;
+    },
+    terminate: () => {
+      terminateCount += 1;
+    },
+  } as never);
+
+  now = new Date("2026-01-01T00:00:30.000Z");
+  controlPlane.router.sweepRuntimeHeartbeats();
+  assert.equal(pingCount, 1);
+  assert.equal(controlPlane.router.hasActiveClient(session.id), true);
+
+  now = new Date("2026-01-01T00:01:00.000Z");
+  controlPlane.router.sweepRuntimeHeartbeats();
+  assert.equal(terminateCount, 1);
+  assert.equal(controlPlane.router.hasActiveClient(session.id), false);
+  assert.equal(controlPlane.router.hasRuntime(session.id), true);
+  assert.equal(controlPlane.getHostedSession(principal, session.id).state, "running");
+
+  controlPlane.router.attachClient(session.id, {
+    readyState: 1,
+    send: () => undefined,
+    on: () => undefined,
+    once: () => undefined,
+    close: () => undefined,
+    ping: () => undefined,
+    terminate: () => undefined,
+  } as never);
+  assert.equal(controlPlane.router.hasActiveClient(session.id), true);
 });
 
 test("stopping a session closes late client upgrades and blocks another session in that workspace", () => {

@@ -1,4 +1,3 @@
-import { StringDecoder } from "node:string_decoder";
 import type { JsonValue, PiRpcRecord } from "@pi-cloud/contracts";
 
 export const redactionMarker = "[REDACTED]";
@@ -11,11 +10,11 @@ export function redactRecord(record: PiRpcRecord, configuredSecrets: readonly st
 
 /** Buffers stderr across chunks so split secrets are redacted before a bounded diagnostic is exposed. */
 export class BoundedStderrDiagnostic {
-  private readonly decoder = new StringDecoder("utf8");
-  private readonly chunks: string[] = [];
+  private readonly chunks: Buffer[] = [];
   private readonly secrets: string[];
   private storedBytes = 0;
   private finished = false;
+  private truncated = false;
 
   constructor(
     configuredSecrets: readonly string[],
@@ -28,18 +27,21 @@ export class BoundedStderrDiagnostic {
   push(chunk: Uint8Array): void {
     if (this.finished || chunk.byteLength === 0) return;
     const allowance = this.maxBytes + this.longestSecretBytes - this.storedBytes;
-    if (allowance <= 0) return;
+    if (allowance <= 0) {
+      this.truncated = true;
+      return;
+    }
     const kept = Buffer.from(chunk).subarray(0, allowance);
+    if (kept.byteLength < chunk.byteLength) this.truncated = true;
     this.storedBytes += kept.byteLength;
-    this.chunks.push(this.decoder.write(kept));
+    this.chunks.push(kept);
   }
 
   finish(): string {
-    if (!this.finished) {
-      this.chunks.push(this.decoder.end());
-      this.finished = true;
-    }
-    return truncateUtf8(redactString(this.chunks.join(""), this.secrets), this.maxBytes);
+    this.finished = true;
+    const retained = Buffer.concat(this.chunks, this.storedBytes);
+    const boundarySafe = this.truncated ? redactSecretPrefixBytesAtEnd(retained, this.secrets) : retained;
+    return truncateUtf8(redactString(boundarySafe.toString("utf8"), this.secrets), this.maxBytes);
   }
 
   private get longestSecretBytes(): number {
@@ -66,6 +68,23 @@ function redactString(value: string, secrets: readonly string[]): string {
   let result = value;
   for (const secret of secrets) result = result.split(secret).join(redactionMarker);
   return result;
+}
+
+/** Redacts a UTF-8 secret prefix cut at any byte of the diagnostic's retained-head boundary. */
+function redactSecretPrefixBytesAtEnd(value: Buffer, secrets: readonly string[]): Buffer {
+  let matchedBytes = 0;
+  for (const secret of secrets) {
+    const encoded = Buffer.from(secret);
+    for (let length = Math.min(encoded.byteLength - 1, value.byteLength); length > matchedBytes; length -= 1) {
+      if (value.subarray(value.byteLength - length).equals(encoded.subarray(0, length))) {
+        matchedBytes = length;
+        break;
+      }
+    }
+  }
+  return matchedBytes === 0
+    ? value
+    : Buffer.concat([value.subarray(0, value.byteLength - matchedBytes), Buffer.from(redactionMarker)]);
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {

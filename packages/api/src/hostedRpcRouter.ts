@@ -60,11 +60,18 @@ type ClientConnection = {
   outboundCumulativeBytes: number;
   inboundSequence: number;
   inboundCumulativeBytes: number;
+  lastPongAt: number;
+  lastPingAt?: number;
 };
 
 type EnvelopeOutcome<T> =
   | { ok: true; envelope: T; bytes: number }
   | { ok: false; code: number; reason: string };
+
+type EncodedEnvelope = {
+  json: string;
+  bytes: number;
+};
 
 /**
  * Routes complete JSON hosted-RPC envelopes in memory between one persistent runtime tunnel and at
@@ -125,7 +132,7 @@ export class HostedRpcRouter {
     if (runtime.socket.readyState === websocketOpen) runtime.socket.send(stopControlMessage);
   }
 
-  /** Closes runtime tunnels that stopped heartbeating or that outstayed their stop deadline. */
+  /** Closes stale runtimes and releases dead public clients without stopping an otherwise healthy runtime. */
   sweepRuntimeHeartbeats(): void {
     const now = this.clock().getTime();
     for (const runtime of this.runtimes.values()) {
@@ -133,8 +140,11 @@ export class HostedRpcRouter {
         this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime did not stop within the grace period");
         continue;
       }
-      if (now - runtime.lastHeartbeatAt <= this.heartbeatTimeoutMs) continue;
-      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
+      if (now - runtime.lastHeartbeatAt > this.heartbeatTimeoutMs) {
+        this.disconnectRuntime(runtime, hostedPolicyCloseCodes.runtimeDisconnected, "hosted runtime heartbeat expired");
+        continue;
+      }
+      if (runtime.client) this.sweepClientLiveness(runtime, runtime.client, now);
     }
   }
 
@@ -216,6 +226,7 @@ export class HostedRpcRouter {
       outboundCumulativeBytes: 0,
       inboundSequence: 0,
       inboundCumulativeBytes: 0,
+      lastPongAt: this.clock().getTime(),
     };
     attachedRuntime.client = client;
 
@@ -223,6 +234,12 @@ export class HostedRpcRouter {
       const current = this.runtimes.get(sessionId);
       if (!current || current.client !== client) return;
       this.onClientMessage(current, client, data, isBinary);
+    });
+    socket.on("pong", () => {
+      const current = this.runtimes.get(sessionId);
+      if (current?.client !== client) return;
+      client.lastPongAt = this.clock().getTime();
+      client.lastPingAt = undefined;
     });
     socket.once("close", () => {
       const current = this.runtimes.get(sessionId);
@@ -291,9 +308,20 @@ export class HostedRpcRouter {
       this.disconnectClient(runtime, client, outcome.code, outcome.reason);
       return;
     }
+    const outbound = this.prepareEnvelope({
+      version: 1,
+      hostedSessionId: runtime.sessionId,
+      direction: "client_to_pi",
+      sequence: runtime.outboundSequence + 1,
+      record: outcome.envelope.record,
+    });
+    if (!withinBudget(runtime.limits, outbound.bytes, runtime.outboundCumulativeBytes)) {
+      this.disconnectClient(runtime, client, hostedPolicyCloseCodes.budgetExceeded, "inbound RPC limit exceeded");
+      return;
+    }
     client.inboundSequence += 1;
     client.inboundCumulativeBytes += outcome.bytes;
-    this.forwardToRuntime(runtime, outcome.envelope);
+    this.forwardToRuntime(runtime, outbound);
     this.store.touchAssignmentHeartbeat(runtime.assignmentId, this.clock());
   }
 
@@ -327,44 +355,32 @@ export class HostedRpcRouter {
   private forwardToClient(runtime: RuntimeConnection, envelope: HostedRpcEnvelope): void {
     const client = runtime.client;
     if (!client) return;
-    const outbound: HostedRpcEnvelope = {
+    const outbound = this.prepareEnvelope({
       version: 1,
       hostedSessionId: runtime.sessionId,
       direction: "pi_to_client",
       sequence: client.outboundSequence + 1,
       record: envelope.record,
-    };
-    const bytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
-    if (!withinBudget(runtime.limits, bytes, client.outboundCumulativeBytes)) {
+    });
+    if (!withinBudget(runtime.limits, outbound.bytes, client.outboundCumulativeBytes)) {
       this.disconnectClient(runtime, client, hostedPolicyCloseCodes.budgetExceeded, "outbound RPC limit exceeded");
       return;
     }
     client.outboundSequence += 1;
-    client.outboundCumulativeBytes += bytes;
-    if (client.socket.readyState === websocketOpen) client.socket.send(JSON.stringify(outbound));
+    client.outboundCumulativeBytes += outbound.bytes;
+    if (client.socket.readyState === websocketOpen) client.socket.send(outbound.json);
   }
 
-  private forwardToRuntime(runtime: RuntimeConnection, envelope: HostedRpcClientEnvelope): void {
-    const outbound: HostedRpcClientEnvelope = {
-      version: 1,
-      hostedSessionId: runtime.sessionId,
-      direction: "client_to_pi",
-      sequence: runtime.outboundSequence + 1,
-      record: envelope.record,
-    };
-    const bytes = Buffer.byteLength(JSON.stringify(outbound), "utf8");
-    if (!withinBudget(runtime.limits, bytes, runtime.outboundCumulativeBytes)) {
-      this.disconnectRuntime(runtime, hostedPolicyCloseCodes.budgetExceeded, "inbound RPC limit exceeded");
-      return;
-    }
+  private forwardToRuntime(runtime: RuntimeConnection, outbound: EncodedEnvelope): void {
     runtime.outboundSequence += 1;
-    runtime.outboundCumulativeBytes += bytes;
-    if (runtime.socket.readyState === websocketOpen) runtime.socket.send(JSON.stringify(outbound));
+    runtime.outboundCumulativeBytes += outbound.bytes;
+    if (runtime.socket.readyState === websocketOpen) runtime.socket.send(outbound.json);
   }
 
-  private disconnectClient(runtime: RuntimeConnection, client: ClientConnection, code: number, reason: string): void {
+  private disconnectClient(runtime: RuntimeConnection, client: ClientConnection, code: number, reason: string, terminate = false): void {
     if (runtime.client === client) runtime.client = undefined;
-    closeIfOpen(client.socket, code, reason);
+    if (terminate) terminateIfOpen(client.socket);
+    else closeIfOpen(client.socket, code, reason);
   }
 
   private disconnectRuntime(runtime: RuntimeConnection, code: number, reason: string): void {
@@ -376,6 +392,23 @@ export class HostedRpcRouter {
     runtime.client = undefined;
     closeIfOpen(client?.socket, hostedPolicyCloseCodes.runtimeDisconnected, reason);
     closeIfOpen(runtime.socket, code, reason);
+  }
+
+  private sweepClientLiveness(runtime: RuntimeConnection, client: ClientConnection, now: number): void {
+    const pingIntervalMs = Math.max(1_000, Math.floor(this.heartbeatTimeoutMs / 2));
+    if (client.lastPingAt !== undefined) {
+      if (now - client.lastPingAt < pingIntervalMs) return;
+      this.disconnectClient(runtime, client, 1001, "public client heartbeat expired", true);
+      return;
+    }
+    if (now - client.lastPongAt < pingIntervalMs) return;
+    client.lastPingAt = now;
+    if (client.socket.readyState === websocketOpen) client.socket.ping();
+  }
+
+  private prepareEnvelope(envelope: HostedRpcEnvelope | HostedRpcClientEnvelope): EncodedEnvelope {
+    const json = JSON.stringify(envelope);
+    return { json, bytes: Buffer.byteLength(json, "utf8") };
   }
 }
 
@@ -440,4 +473,8 @@ function toBuffer(data: RawData): Buffer {
 
 function closeIfOpen(socket: WebSocket | undefined, code: number, reason: string): void {
   if (socket && socket.readyState === websocketOpen) socket.close(code, reason);
+}
+
+function terminateIfOpen(socket: WebSocket | undefined): void {
+  if (socket && socket.readyState === websocketOpen) socket.terminate();
 }

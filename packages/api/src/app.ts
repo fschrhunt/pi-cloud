@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { cloudHostedSessionListSchema, cloudServerCapabilitiesSchema } from "@pi-cloud/contracts";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
@@ -67,6 +68,17 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
   const principal = (authorization: string | undefined): Principal => authenticator.authenticate(authorization);
 
   app.get("/health", async () => ({ status: "ok", service: "pi-cloud-api" }));
+
+  app.get("/v1/capabilities", async () => cloudServerCapabilitiesSchema.parse({
+    service: "pi-cloud-api",
+    protocolVersion: 1,
+    hostedRpcVersion: 1,
+    features: {
+      hostedSessions: true,
+      reconnect: true,
+      nativeSessionResume: true,
+    },
+  }));
 
   app.post("/v1/agents", async (request, reply) => {
     const result = controlPlane.createAgent(
@@ -166,6 +178,14 @@ export async function buildApp(config: ApiConfig, clock?: () => Date) {
   app.get("/v1/workspaces/:workspaceId", async (request) => {
     const { workspaceId } = idParamsSchema.parse(request.params);
     return hostedControlPlane.getWorkspace(principal(request.headers.authorization), required(workspaceId));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions", async (request) => {
+    const { workspaceId } = idParamsSchema.parse(request.params);
+    return cloudHostedSessionListSchema.parse(hostedControlPlane.listHostedSessions(
+      principal(request.headers.authorization),
+      required(workspaceId),
+    ));
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (request, reply) => {

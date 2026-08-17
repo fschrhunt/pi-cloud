@@ -4,12 +4,12 @@ Read [product-scope.md](product-scope.md) for the product contract and [hosted-r
 
 ## Purpose
 
-Pi Cloud makes an unmodified Pi session available from another device. It separates remote orchestration from repository execution while preserving Pi's native sessions and customization model.
+Pi Cloud makes an unmodified server-side Pi session available through `pi --cloud` on a Mac. It separates the local terminal extension and remote orchestration from repository execution while preserving Pi's native sessions and customization model.
 
 ## Topology
 
 ```text
-browser / CLI / local Pi extension
+Mac: `pi --cloud` (`packages/cloud`)
                  │
    authenticated HTTP + WebSocket
                  ▼
@@ -25,7 +25,7 @@ browser / CLI / local Pi extension
           └── `pi --mode rpc`
 ```
 
-The first deployment runs the API and runtime worker on one operator-owned Linux server as separate processes.
+The first deployment runs the API and runtime worker on one operator-owned Linux server as separate Compose services. The Linux server never installs the Mac extension and never runs `pi --cloud`.
 
 ## API and session router
 
@@ -45,9 +45,11 @@ A workspace has a stable identity, owner, repository origin, root directory, Pi 
 
 Workspace isolation applies to filesystem access, process execution, network policy, and credentials. Archive stops active execution while retaining data. M2 intentionally omits metadata-only deletion because persistent data must not be orphaned; the local provider supports explicit volume-wide cleanup.
 
-## Pi process
+## Pi processes
 
-The worker launches the installed Pi CLI with `pi --mode rpc`. Pi owns prompts, steering, follow-ups, cancellation, turns, tools, compaction, model selection, session replacement, and session persistence.
+The Linux worker launches its installed upstream Pi CLI only with `pi --mode rpc`. Pi owns prompts, steering, follow-ups, cancellation, turns, tools, compaction, model selection, session replacement, and session persistence.
+
+On the Mac, `packages/cloud` is an ordinary Pi extension published as `@pi-cloud/extension`. It registers `--cloud` and contains the remote terminal client. Plain `pi` keeps normal local behavior. Clean takeover currently requires the generic upstream hook described in [pi-startup-delegation.md](pi-startup-delegation.md).
 
 ## Pi Cloud runtime extension
 
@@ -58,7 +60,8 @@ Users customize the runtime with ordinary Pi extensions, skills, prompts, provid
 ## Lifecycle
 
 ```text
-client creates or opens workspace
+Mac extension discovers the local Git origin and revision
+→ client creates or opens workspace
 → API authorizes access
 → worker opens the isolated workspace
 → worker injects operation-scoped credentials
@@ -90,6 +93,7 @@ Reconnect uses Pi RPC state and entry cursors. Cloud metadata records connection
 
 | Boundary | Contract |
 | --- | --- |
+| Mac extension → local Pi | Activate only for `--cloud`; never shadow `pi` or create a local agent session for cloud work. |
 | Client → API | Authenticate the request and authorize its workspace and hosted session. |
 | API → runtime worker | Grant authority scoped to one workspace, hosted session, operation, and lifetime. |
 | Runtime → repository | Execute repository code and project Pi resources inside the workspace boundary. |
@@ -115,4 +119,4 @@ open one workspace
 → resume the same native Pi session in the same workspace
 ```
 
-This slice now works end-to-end for one operator-owned server. It remains pre-alpha and does not yet provide multi-tenant hardening or production pooling.
+The server-side slice works end-to-end for one operator-owned server. The Mac terminal extension, upstream startup delegation, and production packaging remain incomplete; the project is still pre-alpha.

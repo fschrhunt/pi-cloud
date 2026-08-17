@@ -1,18 +1,18 @@
 # Product scope
 
-Pi Cloud is a self-hosted remote runtime for unmodified Pi. It keeps Pi, its repository workspace, and its native session on an available server so a person can attach from a browser, CLI, or local Pi extension on any device.
+Pi Cloud is a self-hosted remote runtime for unmodified Pi. It keeps Pi, its repository workspace, and its native session on an available Linux server while the operator attaches from upstream Pi on a Mac with `pi --cloud`.
 
 Pi remains the agent. Pi Cloud supplies authentication, remote transport, workspace and process lifecycle, isolation, scoped credentials, and a small bridge for cloud-specific capabilities.
 
 ## Primary experience
 
 ```text
-install Pi Cloud on an operator-owned server
-→ open a repository workspace
-→ start `pi --mode rpc`
-→ attach from another device
+run the Pi Cloud Compose stack on an operator-owned Linux server
+→ install the Pi Cloud extension into upstream Pi on a Mac
+→ run `pi --cloud` from a local Git repository
+→ the server starts `pi --mode rpc`
 → prompt, steer, follow up, cancel, and reconnect
-→ continue using the same native Pi session and workspace
+→ continue using the same native Pi session and remote workspace
 ```
 
 A hosted session is logically available while its Pi process may stop when idle and resume later.
@@ -23,6 +23,7 @@ A hosted session is logically available while its Pi process may stop when idle 
 | --- | --- |
 | Conversation, turns, tool calls, compaction, branching, model selection | Pi |
 | Native session persistence and replacement semantics | Pi |
+| Local terminal rendering and `--cloud` activation | Pi Cloud Mac extension |
 | Authentication and authorization | Pi Cloud |
 | Remote attachment and reconnect routing | Pi Cloud |
 | Repository workspace and process lifecycle | Pi Cloud |
@@ -49,7 +50,7 @@ The native Pi session is the canonical conversation. Clients reconnect through P
 
 ## Public API
 
-Authenticated HTTP handles server, workspace, and hosted-session lifecycle operations. An authenticated bidirectional stream carries Pi commands, responses, events, and extension interactions.
+The Mac extension uses authenticated HTTP for workspace and hosted-session lifecycle operations. An authenticated bidirectional stream carries Pi commands, responses, events, and extension interactions.
 
 The stream uses a small versioned envelope containing hosted-session identity, direction, sequence, and one Pi RPC record. The public boundary validates, bounds, and redacts records while preserving Pi semantics.
 
@@ -73,7 +74,7 @@ A workspace originates from an operator-approved local path or Git remote. Provi
 
 ## Deployment
 
-The first deployment is one operator-owned Linux server. The API and runtime worker run as separate processes on that server. Docker packages the single-operator deployment and supports local development.
+The first deployment is one operator-owned Linux server. The API and runtime worker run as separate Compose services on that server, which invokes only `pi --mode rpc`. The `@pi-cloud/extension` package and `pi --cloud` run only on an Apple Silicon Mac client.
 
 ## Security invariants
 
@@ -87,11 +88,12 @@ The first deployment is one operator-owned Linux server. The API and runtime wor
 
 ## Core capabilities
 
-- self-hosted installation;
+- self-hosted Compose deployment;
+- a simple Mac Pi extension activated only by `pi --cloud`;
 - authenticated workspace and hosted-session lifecycle;
 - persistent isolated workspaces;
 - Pi RPC process supervision and remote attachment;
 - reconnect, cancellation, archive, and deletion;
 - scoped credentials and resource limits;
 - native Pi customization;
-- a thin cloud capability extension.
+- a thin cloud capability extension when an RPC gap demonstrates the need.

@@ -8,7 +8,7 @@
 
 A self-hosted remote runtime for [Pi](https://pi.dev).
 
-Run Pi on an always-available server and connect from a browser, CLI, or local Pi extension on any device. Your repository workspace and native Pi session stay available across client disconnects and runtime restarts.
+Run Pi on an always-available Linux server and connect from the normal Pi terminal on your Mac with `pi --cloud`. Your repository workspace and native Pi session stay available across client disconnects and runtime restarts.
 
 Pi Cloud starts the installed CLI with `pi --mode rpc`. Pi owns the conversation, tools, models, compaction, and session data. Pi Cloud provides authenticated remote access, workspace and process lifecycle, isolation, and scoped credentials.
 
@@ -18,12 +18,11 @@ Pi Cloud starts the installed CLI with `pi --mode rpc`. Pi owns the conversation
 ## Experience
 
 ```text
-install Pi Cloud on your server
-→ open a repository workspace
-→ start a Pi session
-→ connect from another device
+run the Pi Cloud Compose stack on your Linux server
+→ install the Pi Cloud extension on your Mac
+→ run `pi --cloud` from a local Git repository
 → prompt, steer, follow up, cancel, and reconnect
-→ continue in the same session and workspace
+→ continue in the same native Pi session and remote workspace
 ```
 
 A hosted session remains available while its Pi process is disposable. Pi Cloud can stop an idle process and later resume the native session in its persistent workspace.
@@ -31,7 +30,8 @@ A hosted session remains available while its Pi process is disposable. Pi Cloud 
 ## How it works
 
 ```text
-browser / CLI / local Pi extension
+Mac: upstream Pi + cloud extension
+            `pi --cloud`
                  │
    authenticated HTTP + WebSocket
                  ▼
@@ -73,7 +73,7 @@ The current pre-alpha slice includes:
 - bounded hosted RPC envelopes, LF JSONL Pi supervision, reconnect, stop, restart, and redaction of configured secrets;
 - a local single-operator Docker baseline and a hosted runtime smoke command.
 
-Not yet included: multi-tenant isolation, pooling, horizontal scaling, and production hardening.
+Not yet included: the usable `pi --cloud` terminal client, its required upstream Pi startup-delegation seam, mutable cloud branches, complete server distribution, multi-tenant isolation, pooling, horizontal scaling, and production hardening.
 
 See [docs/hosted-runtime.md](docs/hosted-runtime.md) for the operator contract. Follow broader progress through the [GitHub milestones](https://github.com/fschrhunt/pi-cloud/milestones).
 
@@ -141,7 +141,8 @@ Do not register Colima as a Homebrew service when Docker is needed only for smok
 ```text
 packages/
   api/       Authentication, lifecycle, dispatch, and remote transport
-  contracts/ Shared API and runtime wire contracts
+  cloud/     Mac Pi extension published as @pi-cloud/extension
+  contracts/ Shared client, API, and runtime wire contracts
   runner/    Isolated repository and Pi runtime worker
 assets/      Project identity assets
 docs/        Product, architecture, and protocol documentation
@@ -158,6 +159,7 @@ All workspaces use strict TypeScript and ESM on Node.js 22 or newer.
 - [Hosted runtime](docs/hosted-runtime.md)
 - [Control-plane API](docs/control-plane-api.md)
 - [Task leases](docs/task-leases.md)
+- [`pi --cloud` startup delegation](docs/pi-startup-delegation.md)
 
 ## Security
 

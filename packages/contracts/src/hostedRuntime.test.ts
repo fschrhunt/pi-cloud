@@ -97,6 +97,12 @@ test("client RPC validation preserves request ids and additional native JSON pay
       record: { type: "get_state", id: "pi-cloud-internal-startup-state" },
     }),
   );
+  assert.throws(() =>
+    hostedRpcClientEnvelopeSchema.parse({
+      ...envelope,
+      record: { type: "extension_ui_response", id: "pi-cloud-internal-ui", confirmed: true },
+    }),
+  );
 });
 
 test("bounded envelope parsing accounts for UTF-8 bytes cumulatively", () => {

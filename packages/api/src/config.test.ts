@@ -91,6 +91,12 @@ test("API config requires values for exactly the configured hosted credential re
     }).hostedCredentialValues,
     { "vault://provider/key": "scoped-secret" },
   );
+  assert.throws(() => readApiConfig({
+    ...base,
+    PI_CLOUD_HOSTED_CREDENTIAL_REFERENCES: JSON.stringify([
+      { name: "builtin", reference: "toString", environmentVariable: "BUILTIN" },
+    ]),
+  }), /has no value/);
 });
 
 test("API config rejects a non-local HTTP public base URL", () => {

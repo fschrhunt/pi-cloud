@@ -12,7 +12,7 @@ import {
 import { ApiError, conflict, unauthorized } from "./errors.js";
 import { HostedRpcRouter } from "./hostedRpcRouter.js";
 import { newSessionDirectoryFor, workspaceRootFor } from "./hostedPaths.js";
-import type { ControlPlaneStore } from "./store.js";
+import { decodeListCursor, type ControlPlaneStore } from "./store.js";
 
 const idempotencyKeySchema = z.string().min(8).max(200);
 const listQuerySchema = z.object({
@@ -65,7 +65,7 @@ export class HostedControlPlane {
 
   listWorkspaces(principal: Principal, query: unknown) {
     const parsed = listQuerySchema.parse(query);
-    const cursor = parsed.cursor ? decodeCursor(parsed.cursor) : undefined;
+    const cursor = parsed.cursor ? decodeListCursor(parsed.cursor) : undefined;
     return this.store.listWorkspaces(principal.id, parsed.limit, cursor?.createdAt, cursor?.id);
   }
 
@@ -159,33 +159,13 @@ export class HostedControlPlane {
     const { runnerId } = claimRequestSchema.parse(input);
     const assignmentId = randomUUID();
     const token = randomBytes(32).toString("base64url");
-    const claim = this.store.claimHostedRuntime(runnerId, assignmentId, tokenDigest(token), this.clock());
-    if (!claim) return undefined;
-
-    const { session, workspace } = claim;
-    const launch = hostedRuntimeLaunchSchema.parse({
-      version: 1,
-      hostedSessionId: session.id,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
-      repository: { repositoryUrl: workspace.repositoryUrl, revision: workspace.revision },
-      nativeSession: session.nativeSessionFile
-        ? { kind: "resume", sessionFile: session.nativeSessionFile }
-        : { kind: "new", sessionDirectory: newSessionDirectoryFor(workspace.root, session.id) },
-      piAgentDirectory: workspace.agentDirectory,
-      credentialReferences: workspace.credentialReferences,
-      limits: this.config.hostedLaunchLimits,
-      projectTrust: workspace.projectTrust,
-    });
-    const credentials = workspace.credentialReferences.map((credential) => ({
-      reference: credential.reference,
-      value: this.config.hostedCredentialValues[credential.reference],
-    }));
-    return hostedRuntimeClaimSchema.parse({
-      launch,
-      credentials,
-      tunnel: { url: tunnelUrl(this.config.publicBaseUrl, session.id), token },
-    });
+    return this.store.claimHostedRuntime(
+      runnerId,
+      assignmentId,
+      tokenDigest(token),
+      this.clock(),
+      (session, workspace) => this.buildHostedRuntimeClaim(session, workspace, token),
+    );
   }
 
   /** Authorizes an internal tunnel connection by the raw assignment token presented in its bearer header. */
@@ -206,6 +186,52 @@ export class HostedControlPlane {
     }
     return session;
   }
+
+  /** Builds a hosted runtime claim from durable session metadata and current operator configuration. */
+  private buildHostedRuntimeClaim(session: HostedSession, workspace: Workspace, token: string): HostedRuntimeClaim {
+    const credentials = workspace.credentialReferences.map((credential) => {
+      const value = this.config.hostedCredentialValues[credential.reference];
+      if (typeof value !== "string" || value.length === 0) {
+        throw new ApiError(
+          500,
+          "hosted_runtime_claim_invalid",
+          `Hosted runtime claim cannot be built because credential reference \"${credential.name}\" has no configured value in PI_CLOUD_HOSTED_CREDENTIALS`,
+        );
+      }
+      return { reference: credential.reference, value };
+    });
+    try {
+      const launch = hostedRuntimeLaunchSchema.parse({
+        version: 1,
+        hostedSessionId: session.id,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.root,
+        repository: { repositoryUrl: workspace.repositoryUrl, revision: workspace.revision },
+        nativeSession: session.nativeSessionFile
+          ? { kind: "resume", sessionFile: session.nativeSessionFile }
+          : { kind: "new", sessionDirectory: newSessionDirectoryFor(workspace.root, session.id) },
+        piAgentDirectory: workspace.agentDirectory,
+        credentialReferences: workspace.credentialReferences,
+        limits: this.config.hostedLaunchLimits,
+        projectTrust: workspace.projectTrust,
+      });
+      return hostedRuntimeClaimSchema.parse({
+        launch,
+        credentials,
+        tunnel: { url: tunnelUrl(this.config.publicBaseUrl, session.id), token },
+      });
+    } catch (error: unknown) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof z.ZodError) {
+        throw new ApiError(
+          500,
+          "hosted_runtime_claim_invalid",
+          "Hosted runtime claim cannot be built from the stored session metadata and current API configuration",
+        );
+      }
+      throw error;
+    }
+  }
 }
 
 export function tokenDigest(token: string): string {
@@ -213,26 +239,11 @@ export function tokenDigest(token: string): string {
 }
 
 function tunnelUrl(publicBaseUrl: string, sessionId: string): string {
-  const url = new URL(`/internal/v1/hosted-sessions/${sessionId}/tunnel`, publicBaseUrl);
+  const url = new URL(publicBaseUrl);
+  const basePath = url.pathname === "/" ? "" : url.pathname.replace(/\/+$/u, "");
+  url.pathname = `${basePath}/internal/v1/hosted-sessions/${sessionId}/tunnel`;
+  url.search = "";
+  url.hash = "";
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return url.toString();
-}
-
-function decodeCursor(cursor: string): { createdAt: string; id: string } {
-  try {
-    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof decoded !== "object" ||
-      decoded === null ||
-      !("createdAt" in decoded) ||
-      !("id" in decoded) ||
-      typeof decoded.createdAt !== "string" ||
-      typeof decoded.id !== "string"
-    ) {
-      throw new Error();
-    }
-    return { createdAt: decoded.createdAt, id: decoded.id };
-  } catch {
-    throw conflict("invalid_cursor", "Pagination cursor is invalid");
-  }
 }

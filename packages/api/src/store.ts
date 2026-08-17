@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementResultingChanges } from "node:sqlite";
 import type { CheckoutProvenance, HostedCredentialReference } from "@pi-cloud/contracts";
+import { z } from "zod";
 import {
   hostedSessionStateSchema,
   runBudgetsSchema,
@@ -1184,14 +1185,15 @@ export class ControlPlaneStore {
     });
   }
 
-  /** Atomically claims the oldest queued session for one runner and mints its scoped assignment token digest. */
-  claimHostedRuntime(
+  /** Atomically claims the oldest queued session for one runner after its runtime claim validates. */
+  claimHostedRuntime<T>(
     runnerId: string,
     assignmentId: string,
     tokenDigestValue: string,
     now: Date,
+    buildClaim: (session: HostedSession, workspace: Workspace) => T,
     assignmentTtlSeconds = 60,
-  ): { session: HostedSession; workspace: Workspace } | undefined {
+  ): T | undefined {
     const timestamp = now.toISOString();
     const expiresAt = new Date(now.getTime() + assignmentTtlSeconds * 1_000).toISOString();
     const staleHeartbeatAt = new Date(now.getTime() - assignmentTtlSeconds * 1_000).toISOString();
@@ -1218,6 +1220,10 @@ export class ControlPlaneStore {
         .get() as HostedSessionRow | undefined;
       if (!row) return undefined;
 
+      const session = mapHostedSession(row);
+      const workspace = this.requireWorkspaceInternal(session.workspaceId);
+      const claim = buildClaim(session, workspace);
+
       assertChanged(
         this.database
           .prepare("UPDATE hosted_sessions SET state = 'starting', updated_at = ? WHERE id = ? AND state = 'queued'")
@@ -1229,10 +1235,7 @@ export class ControlPlaneStore {
           "INSERT INTO runtime_assignments (id, hosted_session_id, runner_id, token_digest, started_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .run(assignmentId, row.id, runnerId, tokenDigestValue, timestamp, expiresAt);
-
-      const session = this.requireHostedSessionInternal(row.id);
-      const workspace = this.requireWorkspaceInternal(session.workspaceId);
-      return { session, workspace };
+      return claim;
     });
   }
 
@@ -1638,21 +1641,12 @@ function assertChanged(result: StatementResultingChanges, message: string): void
   if (result.changes !== 1) throw conflict("stale_transition", message);
 }
 
+const listCursorSchema = z.object({ createdAt: z.iso.datetime(), id: z.uuid() }).strict();
+
 /** Decodes a client-owned pagination cursor and rejects malformed values. */
 export function decodeListCursor(cursor: string): { createdAt: string; id: string } {
   try {
-    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
-    if (
-      typeof decoded !== "object" ||
-      decoded === null ||
-      !("createdAt" in decoded) ||
-      !("id" in decoded) ||
-      typeof decoded.createdAt !== "string" ||
-      typeof decoded.id !== "string"
-    ) {
-      throw new Error();
-    }
-    return { createdAt: decoded.createdAt, id: decoded.id };
+    return listCursorSchema.parse(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown);
   } catch {
     throw conflict("invalid_cursor", "Pagination cursor is invalid");
   }

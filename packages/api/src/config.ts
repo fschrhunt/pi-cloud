@@ -68,7 +68,7 @@ const apiConfigSchema = z
       context.addIssue({ code: "custom", message: "credential values exceed 65536 UTF-8 bytes", path: ["hostedCredentialValues"] });
     }
     for (const [index, credential] of config.hostedCredentialReferences.entries()) {
-      if (!(credential.reference in config.hostedCredentialValues)) {
+      if (!Object.hasOwn(config.hostedCredentialValues, credential.reference)) {
         context.addIssue({
           code: "custom",
           message: "configured credential reference has no value",

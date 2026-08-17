@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { workspaceProcessIdentity } from "./workspaceIdentity.js";
+import { clearSupplementaryGroups, workspaceProcessIdentity } from "./workspaceIdentity.js";
+
+test("workspace isolation clears inherited supplementary groups before child launches", () => {
+  let groups: readonly (string | number)[] | undefined;
+  clearSupplementaryGroups((value) => { groups = value; });
+  assert.deepEqual(groups, []);
+});
 
 test("workspace process identities are stable and separated", () => {
   const first = workspaceProcessIdentity("66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9");

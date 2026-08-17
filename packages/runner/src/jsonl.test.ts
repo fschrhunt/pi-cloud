@@ -47,6 +47,22 @@ test("complete stdout records and stderr diagnostics redact secrets split across
   assert.equal(Buffer.byteLength(unicode.finish()), 0);
 });
 
+test("bounded stderr redacts a secret prefix cut after an earlier redaction shrinks the retained head", () => {
+  const secret = "abcdefghijklmnopqrstuvwxyz1234";
+  const stderr = new BoundedStderrDiagnostic([secret], 20);
+  stderr.push(Buffer.from(secret + secret));
+  const diagnostic = stderr.finish();
+  assert.equal(diagnostic, "[REDACTED][REDACTED]");
+  assert.doesNotMatch(diagnostic, /abcdefghij/u);
+});
+
+test("bounded stderr redacts a Unicode secret prefix cut within a code point", () => {
+  const secret = "abcdefghijklmnopqrst😀1234";
+  const stderr = new BoundedStderrDiagnostic([secret], 21);
+  stderr.push(Buffer.from(secret + secret));
+  assert.equal(stderr.finish(), "[REDACTED][REDACTED]");
+});
+
 test("strict parser enforces cumulative record bytes", () => {
   const line = Buffer.from('{"type":"x"}\n');
   const parser = new StrictJsonlParser({ maxPartialBytes: 20, maxRecordBytes: 20, maxCumulativeBytes: 20 }, () => undefined);

@@ -73,6 +73,10 @@ export class HostedControlPlane {
     return this.store.requireWorkspace(principal.id, workspaceId);
   }
 
+  listHostedSessions(principal: Principal, workspaceId: string): { items: HostedSession[] } {
+    return { items: this.store.listHostedSessionsForWorkspace(principal.id, workspaceId) };
+  }
+
   createHostedSession(principal: Principal, workspaceId: string, input: unknown, idempotencyKey: unknown) {
     createHostedSessionSchema.parse(input ?? {});
     const workspace = this.store.requireWorkspace(principal.id, workspaceId);

@@ -24,6 +24,17 @@ test("smoke diagnostics redact a secret suffix cut before a later occurrence shr
   assert.doesNotMatch(diagnostic, /uvwxyz1234/u);
 });
 
+test("smoke diagnostics redact a Unicode secret suffix cut within a code point", () => {
+  const secret = "😀abcdefghijklmnopqrstuvwxyz1234";
+  const retainedBytes = 32_768 + Buffer.byteLength(secret);
+  const filler = "x".repeat(retainedBytes + 1 - 2 * Buffer.byteLength(secret));
+  const buffered = appendBoundedDiagnostic("", secret + filler + secret, [secret]);
+  const diagnostic = redactBoundedDiagnostic(buffered, [secret]);
+  assert.ok(Buffer.byteLength(diagnostic) <= 32_768);
+  assert.equal(diagnostic.startsWith("[REDACTED]"), true);
+  assert.doesNotMatch(diagnostic, /hijklmnopqrstuvwxyz1234/u);
+});
+
 class FakeSocket extends EventEmitter {
   readyState = WebSocket.OPEN;
   terminated = false;

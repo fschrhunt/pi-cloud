@@ -144,14 +144,25 @@ test("list endpoints reject invalid pagination cursors for classic and hosted re
     payload: { repositoryUrl: "https://github.com/pi-cloud/example", revision },
   });
   const invalidCursor = encodeCursor({ createdAt: "", id: "00000000-0000-0000-0000-000000000000", extra: true });
+  const invalidTimestampCursor = encodeCursor({
+    createdAt: "not-a-timestamp",
+    id: "00000000-0000-0000-0000-000000000000",
+  });
 
   const agents = await app.inject({ method: "GET", url: `/v1/agents?cursor=${invalidCursor}`, headers: authorization });
   const workspaces = await app.inject({ method: "GET", url: `/v1/workspaces?cursor=${invalidCursor}`, headers: authorization });
+  const malformedTimestamp = await app.inject({
+    method: "GET",
+    url: `/v1/agents?cursor=${invalidTimestampCursor}`,
+    headers: authorization,
+  });
 
   assert.equal(agents.statusCode, 409);
   assert.equal(agents.json().code, "invalid_cursor");
   assert.equal(workspaces.statusCode, 409);
   assert.equal(workspaces.json().code, "invalid_cursor");
+  assert.equal(malformedTimestamp.statusCode, 409);
+  assert.equal(malformedTimestamp.json().code, "invalid_cursor");
   await app.close();
 });
 

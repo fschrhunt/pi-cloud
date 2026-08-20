@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import cloud, {
   CLOUD_DETACH_FLAG,
   CLOUD_FLAG,
+  guardCloudStartup,
   STARTUP_DELEGATION_REQUIRED,
 } from "./index.js";
 
@@ -45,6 +46,7 @@ test("unsupported Pi versions fail closed instead of running a local prompt", ()
 
   assert.ok(sessionStart);
   sessionStart({} as never, {
+    mode: "tui",
     ui: {
       notify(message: string, level: string) {
         notifications.push({ message, level });
@@ -57,4 +59,49 @@ test("unsupported Pi versions fail closed instead of running a local prompt", ()
 
   assert.deepEqual(notifications, [{ message: STARTUP_DELEGATION_REQUIRED, level: "error" }]);
   assert.equal(shutdown, true);
+});
+
+test("print, JSON, and RPC sessions hard-fail instead of running a local prompt", () => {
+  for (const mode of ["print", "json", "rpc"]) {
+    const notifications: string[] = [];
+    let shutdown = false;
+    assert.throws(
+      () =>
+        guardCloudStartup({
+          mode,
+          notify(message) {
+            notifications.push(message);
+          },
+          shutdown() {
+            shutdown = true;
+          },
+          hardFail() {
+            throw new Error("hard fail");
+          },
+        }),
+      /hard fail/,
+    );
+    assert.equal(shutdown, false);
+    assert.deepEqual(notifications, [STARTUP_DELEGATION_REQUIRED]);
+  }
+});
+
+test("interactive sessions fail closed with a graceful shutdown request", () => {
+  const notifications: string[] = [];
+  let shutdown = false;
+  guardCloudStartup({
+    mode: "tui",
+    notify(message) {
+      notifications.push(message);
+    },
+    shutdown() {
+      shutdown = true;
+    },
+    hardFail() {
+      throw new Error("unexpected hard fail");
+    },
+  });
+
+  assert.equal(shutdown, true);
+  assert.deepEqual(notifications, [STARTUP_DELEGATION_REQUIRED]);
 });

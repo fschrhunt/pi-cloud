@@ -31,8 +31,10 @@ export class CloudApiClient {
     return this.request("v1/capabilities", cloudServerCapabilitiesSchema, { authenticated: false });
   }
 
-  listWorkspaces(): Promise<{ items: CloudWorkspace[]; nextCursor: string | null }> {
-    return this.request("v1/workspaces?limit=100", cloudWorkspaceListSchema);
+  listWorkspaces(cursor?: string): Promise<{ items: CloudWorkspace[]; nextCursor: string | null }> {
+    const query = new URLSearchParams({ limit: "100" });
+    if (cursor !== undefined) query.set("cursor", cursor);
+    return this.request(`v1/workspaces?${query.toString()}`, cloudWorkspaceListSchema);
   }
 
   createWorkspace(input: {

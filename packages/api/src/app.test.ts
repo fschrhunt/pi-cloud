@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { verifyTaskLease } from "@pi-cloud/contracts";
+import { cloudServerCapabilitiesSchema, verifyTaskLease } from "@pi-cloud/contracts";
 import { buildApp } from "./app.js";
 import type { ApiConfig } from "./config.js";
 
@@ -95,6 +95,60 @@ async function reportCheckoutProvenance(app: Awaited<ReturnType<typeof buildApp>
 function encodeCursor(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
+
+test("capabilities advertise the terminal client protocol without authentication", async () => {
+  const app = await buildApp(config());
+  const response = await app.inject({ method: "GET", url: "/v1/capabilities" });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(cloudServerCapabilitiesSchema.parse(response.json()), {
+    service: "pi-cloud-api",
+    protocolVersion: 1,
+    hostedRpcVersion: 1,
+    features: {
+      hostedSessions: true,
+      reconnect: true,
+      nativeSessionResume: true,
+    },
+  });
+
+  await app.close();
+});
+
+test("hosted sessions can be listed by owned workspace for terminal resume", async () => {
+  const app = await buildApp(config());
+  const workspaceResponse = await app.inject({
+    method: "POST",
+    url: "/v1/workspaces",
+    headers: { ...authorization, "idempotency-key": "workspace-list-sessions" },
+    payload: { repositoryUrl: "https://github.com/pi-cloud/example", revision },
+  });
+  const workspace = workspaceResponse.json<{ id: string }>();
+  const sessionResponse = await app.inject({
+    method: "POST",
+    url: `/v1/workspaces/${workspace.id}/sessions`,
+    headers: { ...authorization, "idempotency-key": "session-list-sessions" },
+    payload: {},
+  });
+  const session = sessionResponse.json<{ id: string }>();
+
+  const listed = await app.inject({
+    method: "GET",
+    url: `/v1/workspaces/${workspace.id}/sessions`,
+    headers: authorization,
+  });
+  const denied = await app.inject({
+    method: "GET",
+    url: `/v1/workspaces/${workspace.id}/sessions`,
+    headers: { authorization: `Bearer ${otherToken}` },
+  });
+
+  assert.equal(listed.statusCode, 200);
+  assert.deepEqual(listed.json<{ items: Array<{ id: string }> }>().items.map((item) => item.id), [session.id]);
+  assert.equal(denied.statusCode, 404);
+
+  await app.close();
+});
 
 test("agent API authenticates, authorizes, paginates, and makes creates idempotent", async () => {
   const app = await buildApp(config());

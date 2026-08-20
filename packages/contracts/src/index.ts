@@ -3,6 +3,21 @@ export {
   type CheckoutProvenance,
 } from "./checkout.js";
 export {
+  cloudClientConfigSchema,
+  cloudClientProtocolVersion,
+  cloudHostedSessionListSchema,
+  cloudHostedSessionSchema,
+  cloudRpcTicketSchema,
+  cloudServerCapabilitiesSchema,
+  cloudServerUrlSchema,
+  cloudWorkspaceListSchema,
+  cloudWorkspaceSchema,
+  type CloudClientConfig,
+  type CloudHostedSession,
+  type CloudServerCapabilities,
+  type CloudWorkspace,
+} from "./cloudClient.js";
+export {
   immutableRevisionSchema,
   parseRepositoryUrl,
   repositoryUrlSchema,

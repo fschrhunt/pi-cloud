@@ -8,7 +8,7 @@ Pi Cloud requires Node 22.19 or newer, which also satisfies `node:sqlite`. Migra
 
 ## Authentication
 
-`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` HTTP routes require one of those tokens and constrain every agent, run, workspace, hosted session, RPC attachment, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned. Non-browser RPC clients may authenticate the WebSocket upgrade with the same bearer; browser clients exchange it over authenticated HTTP for a 60-second, single-use, session-scoped attachment ticket carried in the WebSocket subprotocol header. Issuing a new ticket revokes any older outstanding ticket for that hosted session.
+`PI_CLOUD_API_CREDENTIALS` is a JSON array of bootstrap user/service bearer identities. Public `/v1` HTTP routes other than the safe `GET /v1/capabilities` document require one of those tokens and constrain every agent, run, workspace, hosted session, RPC attachment, archive, cancellation, and delete operation to its subject. Tokens are hashed before lookup and are never returned. Non-browser RPC clients may authenticate the WebSocket upgrade with the same bearer; browser clients exchange it over authenticated HTTP for a 60-second, single-use, session-scoped attachment ticket carried in the WebSocket subprotocol header. Issuing a new ticket revokes any older outstanding ticket for that hosted session.
 
 `PI_CLOUD_DISPATCHER_TOKEN` protects claim and recovery operations. A claimed runner receives a signed lease once. Redemption verifies its signature, expiry, audience, task, and assigned runner, then atomically marks it consumed. Later runner requests prove possession against the stored token hash, so heartbeats can extend assignment liveness without changing the signed lease's five-minute redemption lifetime.
 
@@ -29,9 +29,12 @@ Agent creation records the authenticated creator/requester, API origin, exact re
 
 ## Hosted workspace and session lifecycle
 
+`GET /v1/capabilities` is an unauthenticated, versioned compatibility preflight for the Mac extension. It exposes only service and protocol versions plus supported hosted-session features.
+
 Hosted workspace and session metadata is owner-scoped and durable, while runtime and client WebSockets remain disposable:
 
 - `POST /v1/workspaces`, `GET /v1/workspaces`, and `GET /v1/workspaces/:workspaceId` create and read owned workspace metadata.
+- `GET /v1/workspaces/:workspaceId/sessions` lists the owned workspace's hosted sessions for terminal resume.
 - `POST /v1/workspaces/:workspaceId/sessions` creates one queued hosted session. A workspace cannot have another queued, starting, or running session, and cannot create a replacement while its stopped runtime tunnel is still closing.
 - `GET /v1/hosted-sessions/:sessionId` reads owned session state.
 - `POST /v1/hosted-sessions/:sessionId/start`, `/stop`, and `/archive` enforce the queued, starting, running, stopped, and archived lifecycle. Stop immediately closes the mutating client and asks the runtime to shut down; restart and archive wait for its tunnel to close.

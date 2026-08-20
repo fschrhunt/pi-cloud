@@ -1092,10 +1092,11 @@ export class ControlPlaneStore {
     return session;
   }
 
+  /** Lists the newest bounded session history used by terminal resume selection. */
   listHostedSessionsForWorkspace(ownerId: string, workspaceId: string): HostedSession[] {
     this.requireWorkspace(ownerId, workspaceId);
     const rows = this.database
-      .prepare("SELECT * FROM hosted_sessions WHERE workspace_id = ? ORDER BY created_at ASC")
+      .prepare("SELECT * FROM hosted_sessions WHERE workspace_id = ? ORDER BY created_at DESC, id DESC LIMIT 1000")
       .all(workspaceId) as unknown as HostedSessionRow[];
     return rows.map(mapHostedSession);
   }

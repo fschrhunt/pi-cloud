@@ -26,13 +26,8 @@ export async function resolveCloudSession(
   } = {},
 ): Promise<{ workspace: CloudWorkspace; session: CloudHostedSession }> {
   await api.capabilities();
-  const listed = await api.listWorkspaces();
-  if (listed.nextCursor !== null) {
-    throw new Error("Pi Cloud workspace lookup exceeded the first 100 results");
-  }
-
-  const repositoryWorkspaces = listed.items.filter((candidate) =>
-    candidate.repositoryUrl === repository.repositoryUrl);
+  const repositoryWorkspaces = (await listAllWorkspaces((cursor) => api.listWorkspaces(cursor)))
+    .filter((candidate) => candidate.repositoryUrl === repository.repositoryUrl);
   let workspace = intent === "continue"
     ? repositoryWorkspaces.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]
     : repositoryWorkspaces.find((candidate) => candidate.revision === repository.revision);
@@ -105,4 +100,23 @@ function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
     }, milliseconds);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/** Collects every owned workspace across pages, rejecting a server that fails to advance. */
+async function listAllWorkspaces(
+  list: (cursor: string | undefined) => Promise<{ items: CloudWorkspace[]; nextCursor: string | null }>,
+): Promise<CloudWorkspace[]> {
+  const workspaces: CloudWorkspace[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    if (cursor !== undefined) {
+      if (seenCursors.has(cursor)) throw new Error("Pi Cloud workspace lookup made no progress");
+      seenCursors.add(cursor);
+    }
+    const page = await list(cursor);
+    workspaces.push(...page.items);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+  return workspaces;
 }

@@ -56,6 +56,6 @@ The seam must not know about Pi Cloud, HTTP, WebSockets, hosted sessions, or aut
 
 ## Pi Cloud behavior before the seam exists
 
-`packages/cloud/index.ts` registers the intended flags. On current Pi versions, `pi --cloud` fails closed with a precise startup-delegation error and requests graceful shutdown. This guard prevents a cloud prompt from accidentally running against the local repository, but it is not the finished startup path and does not satisfy the MVP gate.
+`packages/cloud/index.ts` registers the intended flags. On current Pi versions, `pi --cloud` fails closed with a precise startup-delegation error. Interactive mode requests graceful shutdown; print, JSON, and RPC modes exit non-zero because Pi 0.84.x either binds no shutdown handler for them (print, JSON) or defers shutdown until after the next command (RPC), so Pi would otherwise run the cloud-intended prompt against the local repository. This guard is not the finished startup path and does not satisfy the MVP gate.
 
 The curl installer must eventually enforce the minimum Pi version containing the upstream seam before installing `@pi-cloud/extension`.

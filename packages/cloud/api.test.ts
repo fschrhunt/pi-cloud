@@ -18,6 +18,24 @@ test("API URLs preserve a configured reverse-proxy base path", () => {
   );
 });
 
+test("workspace listing forwards the pagination cursor", async () => {
+  const requests: Request[] = [];
+  const fetchImplementation: typeof fetch = async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    return Response.json({ items: [], nextCursor: null });
+  };
+  const client = new CloudApiClient(config, fetchImplementation);
+
+  await client.listWorkspaces("cursor-value");
+
+  assert.equal(
+    requests[0]?.url,
+    "https://pi.example.test/base/v1/workspaces?limit=100&cursor=cursor-value",
+  );
+  assert.equal(requests[0]?.headers.get("authorization"), `Bearer ${config.token}`);
+});
+
 test("capability preflight is unauthenticated while lifecycle requests use the bearer token", async () => {
   const requests: Request[] = [];
   const fetchImplementation: typeof fetch = async (input, init) => {

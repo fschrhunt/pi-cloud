@@ -27,6 +27,11 @@ export class CloudApiClient {
     private readonly fetchImplementation: Fetch = fetch,
   ) {}
 
+  /** The validated server URL, used by the RPC transport to derive its WebSocket endpoint. */
+  get serverUrl(): string {
+    return this.config.serverUrl;
+  }
+
   capabilities(): Promise<CloudServerCapabilities> {
     return this.request("v1/capabilities", cloudServerCapabilitiesSchema, { authenticated: false });
   }

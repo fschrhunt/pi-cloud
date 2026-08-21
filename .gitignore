@@ -1,10 +1,9 @@
 node_modules/
 dist/
-.env
-.env.*
 !.env.example
 coverage/
 data/
 *.sqlite-shm
 *.sqlite-wal
 .DS_Store
+config.bat

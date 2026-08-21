@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { HostedRuntimeLaunch } from "@pi-cloud/contracts";
 import WebSocket from "ws";
-import { HostedRuntimeDispatcherClient, runHostedRuntimeWorker, validateNativeSessionRecord } from "./hostedRuntimeWorker.js";
+import { cloudBranchName, HostedRuntimeDispatcherClient, runHostedRuntimeWorker, validateNativeSessionRecord } from "./hostedRuntimeWorker.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 const exitFixture = fileURLToPath(new URL("./fixtures/exit-pi.mjs", import.meta.url));
@@ -163,6 +163,7 @@ test("hosted worker rejects RPC traffic received before Pi supervision starts", 
           completedAt: new Date().toISOString(),
         };
       },
+      createCloudBranch: async () => {},
     }), /before Pi supervision started/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -250,6 +251,7 @@ test("hosted worker checks out an absent repository and requests native state on
           completedAt: new Date().toISOString(),
         };
       },
+      createCloudBranch: async () => {},
     }), true);
     assert.equal(checkoutCount, 1);
     assert.deepEqual(startupOrder, ["tunnel", "checkout"]);
@@ -291,7 +293,85 @@ test("hosted worker checks out an absent repository and requests native state on
         startedAt: new Date().toISOString(),
         completedAt: new Date().toISOString(),
       }),
+      createCloudBranch: async () => {},
     }), /exited unexpectedly|startup/i);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cloud branch name is derived from the workspace UUID", () => {
+  assert.equal(cloudBranchName("66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9"), "pi-cloud/66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9");
+});
+
+test("first checkout creates a cloud branch at the sealed base revision", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "pi-cloud-branch-create-"));
+  const workspaceRoot = join(root, "workspaces", "one");
+  const sessionDirectory = join(root, "sessions", "one");
+  const piAgentDirectory = join(root, "agent", "default");
+  await Promise.all([
+    fs.mkdir(join(root, "workspaces"), { recursive: true }),
+    fs.mkdir(sessionDirectory, { recursive: true }),
+    fs.mkdir(piAgentDirectory, { recursive: true }),
+  ]);
+  const launch: HostedRuntimeLaunch = {
+    version: 1,
+    hostedSessionId: "a0d701e3-bae6-427a-bc22-35d885915da3",
+    workspaceId: "66f9b7c1-6e3e-40d2-bdcf-dc5c3b6c91d9",
+    workspaceRoot,
+    repository: {
+      repositoryUrl: "https://github.com/pi-cloud/example",
+      revision: "0123456789abcdef0123456789abcdef01234567",
+    },
+    nativeSession: { kind: "new", sessionDirectory },
+    piAgentDirectory,
+    credentialReferences: [],
+    limits: {
+      wallTimeSeconds: 10,
+      idleTimeSeconds: 5,
+      terminationGraceSeconds: 1,
+      maxRecordBytes: 16_384,
+      maxCumulativeBytes: 100_000,
+    },
+    projectTrust: "untrusted",
+  };
+
+  let branchCreated = false;
+  const socket = new FakeSocket();
+
+  try {
+    await runHostedRuntimeWorker({
+      dispatcher: {
+        claim: async () => ({
+          launch,
+          credentials: [],
+          tunnel: { url: "ws://127.0.0.1/internal", token: "tunnel-token" },
+        }),
+      },
+      runnerId: "hosted-runner-branch",
+      authorizedRoots: { workspaceRoots: [join(root, "workspaces")], sessionRoots: [join(root, "sessions")], agentRoots: [join(root, "agent")] },
+      piExecutable: fixture,
+      createWebSocket: () => socket as unknown as WebSocket,
+      checkout: async () => {
+        await fs.mkdir(workspaceRoot, { recursive: true });
+        return {
+          repositoryUrl: launch.repository.repositoryUrl,
+          revision: launch.repository.revision,
+          resolvedCommit: launch.repository.revision,
+          transport: "https",
+          credentialSource: "anonymous",
+          credentialScrubbed: true,
+          submodulesInitialized: false,
+          hooksDisabled: true,
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        };
+      },
+      createCloudBranch: async () => {
+        branchCreated = true;
+      },
+    });
+    assert.equal(branchCreated, true, "createCloudBranch was not called after first checkout");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

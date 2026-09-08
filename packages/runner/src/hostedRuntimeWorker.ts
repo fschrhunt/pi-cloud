@@ -49,6 +49,7 @@ export type HostedRuntimeWorkerOptions = {
   piExecutable?: string;
   processIsolation?: "inherit" | "workspace_uid";
   checkout?: typeof checkoutExactRevision;
+  createCloudBranch?: typeof createCloudBranch;
   createWebSocket?: (url: string, token: string) => WebSocket;
   signal?: AbortSignal;
 };
@@ -174,7 +175,7 @@ export async function runHostedRuntimeWorker(options: HostedRuntimeWorkerOptions
   heartbeatTimer.unref();
 
   try {
-    const checkedOut = await materializeRepository(launch, options.checkout ?? checkoutExactRevision, processIdentity, options.signal);
+    const checkedOut = await materializeRepository(launch, options.checkout ?? checkoutExactRevision, options.createCloudBranch ?? createCloudBranch, processIdentity, options.signal);
     if (processIdentity && checkedOut) await applyWorkspaceOwnership(launch, processIdentity);
     supervisor = new PiRpcSupervisor({
       launch,
@@ -256,9 +257,35 @@ export function createAuthenticatedWebSocket(url: string, token: string): WebSoc
   return new WebSocket(parsed, { headers: { authorization: `Bearer ${token}` } });
 }
 
+/** Deterministic stable branch name for one workspace, derived from its UUID. */
+export function cloudBranchName(workspaceId: string): string {
+  return `pi-cloud/${workspaceId}`;
+}
+
+/**
+ * Creates the stable cloud branch at the current (base revision) HEAD after a sealed first checkout.
+ * The branch persists across restarts; HEAD may advance through normal commits without breaking resume.
+ */
+export async function createCloudBranch(
+  launch: HostedRuntimeLaunch,
+  options: { processIdentity?: RuntimeProcessIdentity; signal?: AbortSignal } = {},
+): Promise<void> {
+  const branch = cloudBranchName(launch.workspaceId);
+  const gitOptions = {
+    shell: false as const,
+    timeout: 30_000,
+    env: isolatedGitEnvironment(launch),
+    signal: options.signal,
+    ...(options.processIdentity ?? {}),
+  };
+  const safeGit = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
+  await execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "checkout", "-b", branch], gitOptions);
+}
+
 async function materializeRepository(
   launch: HostedRuntimeLaunch,
   checkout: typeof checkoutExactRevision,
+  createBranch: typeof createCloudBranch,
   processIdentity?: RuntimeProcessIdentity,
   signal?: AbortSignal,
 ): Promise<boolean> {
@@ -281,15 +308,17 @@ async function materializeRepository(
       ...(processIdentity ?? {}),
     };
     const safeGit = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper="];
-    const [{ stdout }, { stdout: remoteUrl }] = await Promise.all([
-      execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "rev-parse", "HEAD"], gitOptions),
+    const branch = cloudBranchName(launch.workspaceId);
+    const [{ stdout: remoteUrl }, { stdout: currentBranch }] = await Promise.all([
       execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "remote", "get-url", "origin"], gitOptions),
+      execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "rev-parse", "--abbrev-ref", "HEAD"], gitOptions),
     ]);
-    if (stdout.trim().toLowerCase() !== launch.repository.revision) {
-      throw new Error("Persistent workspace revision does not match hosted runtime launch");
-    }
     if (new URL(remoteUrl.trim()).toString() !== launch.repository.repositoryUrl) {
       throw new Error("Persistent workspace repository does not match hosted runtime launch");
+    }
+    if (currentBranch.trim() !== branch) {
+      // Switch to the cloud branch if it exists; reject any other branch as a workspace integrity failure.
+      await execFileAsync("git", [...safeGit, "-C", launch.workspaceRoot, "checkout", branch], gitOptions);
     }
     return false;
   }
@@ -304,6 +333,7 @@ async function materializeRepository(
     source: { kind: "https-url", repositoryUrl: launch.repository.repositoryUrl },
     scratchRoot: dirname(launch.workspaceRoot),
   }, { processIdentity, signal });
+  await createBranch(launch, { processIdentity, signal });
   return true;
 }
 
